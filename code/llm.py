@@ -65,6 +65,15 @@ def load_env(path):
 
 
 class ModelClient:
+    def __new__(cls, cache_dir, offline=False):
+        provider = os.getenv('AUDIT_PROVIDER', 'gemini').lower().strip()
+        if provider not in {'gemini', 'groq'}:
+            raise ValueError('AUDIT_PROVIDER must be gemini or groq')
+        if cls is ModelClient and provider == 'groq':
+            from groq_client import GroqModelClient
+            return object.__new__(GroqModelClient)
+        return object.__new__(cls)
+
     def __init__(self, cache_dir, offline=False):
         self.key = '' if offline else (os.getenv('GEMINI_API_KEY') or os.getenv('GOOGLE_API_KEY', ''))
         self.text_model = os.getenv('GEMINI_TEXT_MODEL') or os.getenv('GEMINI_MODEL') or 'gemini-3.6-flash'

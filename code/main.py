@@ -3,6 +3,7 @@ import argparse
 import csv
 import json
 import logging
+import math
 import sys
 import time
 import zipfile
@@ -87,15 +88,33 @@ def usage_summary(calls, cache_hits, count, mode, run_id):
             item[field] += call.get(field) or 0
         if call.get('input_tokens') is None or call.get('output_tokens') is None:
             item['unknown_usage_calls'] += 1
-    input_rate = os.getenv('AUDIT_INPUT_USD_PER_MILLION')
-    output_rate = os.getenv('AUDIT_OUTPUT_USD_PER_MILLION')
-    cached_rate = os.getenv('AUDIT_CACHED_USD_PER_MILLION', input_rate)
+    def rates_for(key):
+        provider, model = key.split('/', 1)
+        prefixes = ['AUDIT']
+        if provider == 'groq':
+            defaults = {'INTENT':'openai/gpt-oss-20b', 'REVIEW':'openai/gpt-oss-120b', 'EVIDENCE':'qwen/qwen3.8-27b'}
+            prefixes = ['GROQ_'+role for role, default in defaults.items()
+                        if (os.getenv('GROQ_'+role+'_MODEL') or default) == model]
+        candidates = []
+        try:
+            for prefix in prefixes:
+                input_rate = float(os.environ[prefix+'_INPUT_USD_PER_MILLION'])
+                output_rate = float(os.environ[prefix+'_OUTPUT_USD_PER_MILLION'])
+                cached_rate = float(os.getenv(prefix+'_CACHED_USD_PER_MILLION') or input_rate)
+                rates = (input_rate, output_rate, cached_rate)
+                if not all(math.isfinite(rate) and rate >= 0 for rate in rates): return None
+                candidates.append(rates)
+        except (KeyError, ValueError, TypeError): return None
+        # Shared model IDs cannot honestly use two conflicting price schedules.
+        return candidates[0] if candidates and all(r == candidates[0] for r in candidates) else None
     total_cost = 0.0
-    for item in per_model.values():
-        if input_rate is not None and output_rate is not None and not item['unknown_usage_calls']:
-            item['estimated_usd'] = ((max(0, item['input_tokens'] - item['cached_tokens']) * float(input_rate) +
-                                      item['cached_tokens'] * float(cached_rate) +
-                                      (item['output_tokens'] + item['thinking_tokens']) * float(output_rate)) / 1_000_000)
+    for key, item in per_model.items():
+        rates = rates_for(key)
+        if rates is not None and not item['unknown_usage_calls']:
+            input_rate, output_rate, cached_rate = rates
+            item['estimated_usd'] = ((max(0, item['input_tokens'] - item['cached_tokens']) * input_rate +
+                                      item['cached_tokens'] * cached_rate +
+                                      (item['output_tokens'] + item['thinking_tokens']) * output_rate) / 1_000_000)
             total_cost += item['estimated_usd']
         else:
             item['estimated_usd'] = None
@@ -107,6 +126,7 @@ def usage_summary(calls, cache_hits, count, mode, run_id):
     overall['estimated_usd_per_request'] = overall['estimated_usd'] / count if count and overall['estimated_usd'] is not None else None
     return {'run_id': run_id, 'mode': mode, 'requests': count, 'models': per_model, 'overall': overall,
             'operation_counts': dict(Counter(call.get('operation', 'generate_content') for call in calls)),
+            'task_counts': dict(Counter(call.get('task', 'unknown') for call in calls)),
             'response_cache_hits': cache_hits, 'notes': 'Actual calls attributable to this logical run; resumed checkpoints retain prior calls. Reused extraction from earlier runs is not billed again. Missing provider usage is not zero.'}
 
 
@@ -126,11 +146,13 @@ def write_usage_report(summary, root):
                   f"Estimated total USD: {overall['estimated_usd']}; per request: {overall['estimated_usd_per_request']}.", '',
                   f"Accepted response-cache hits: {summary['response_cache_hits']}; evidence extraction cache hits: {summary.get('evidence_cache_hits', 0)}.", '', summary['notes'], '',
                   'SDK operation counts: ' + json.dumps(summary.get('operation_counts', {}), sort_keys=True) + '. '
-                  'Token-count requests count toward local RPM and concurrency; their returned counts reserve generation input TPM. '
-                  'They do not contribute generated-model input/output token totals. Failed requests retain conservative reservations.', '',
+                  'Gemini token-count requests count toward local RPM/concurrency and reserve generation input TPM. '
+                  'They do not contribute generated-model input/output totals. Groq reserves combined input/output TPM and daily budgets; '
+                  'reasoning is already included in completion tokens. Failed requests retain conservative reservations.', '',
+                  'Task counts (including secondary intent evaluation): ' + json.dumps(summary.get('task_counts', {}), sort_keys=True) + '.', '',
                   'Costs require explicitly configured verified per-million rates. A free tier may have zero money cost but nonzero quota/token usage. '
                   'Unknown token usage is excluded from numerical totals and disclosed above. Cached extraction construction cost from previous runs is not included in this run; '
-                  'record those earlier runs separately when calculating total project expenditure. Offline runs do not verify live Gemini/vision accuracy.', ''])
+                  'record those earlier runs separately when calculating total project expenditure. Offline runs do not verify live model/vision accuracy.', ''])
     path = root / 'code/evaluation/usage_report.md'
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text('\n'.join(lines), encoding='utf-8')
@@ -191,7 +213,12 @@ def run(args):
     if output.resolve().is_relative_to(dataset):
         raise ValueError('output must not overwrite participant input data')
     console.progress('START', 0, len(requests), f"mode={mode} | provider={client.configuration()['provider']} | model={client.text_model or 'none'}")
-    console.progress('QUOTA', 0, len(requests), f'RPM={client.rpm} | input TPM={client.tpm} | concurrency={client.max_concurrency} | shared async SDK queue')
+    if hasattr(client, 'role_config'):
+        for role, config in client.role_config.items():
+            console.progress('MODEL', 0, len(requests), f"{role}={config['model']} | RPM={config['rpm']} | combined TPM={config['tpm']} | RPD={config['rpd']} | TPD={config['tpd']}")
+        console.progress('QUOTA', 0, len(requests), f'provider concurrency={client.max_concurrency} | shared per-model async queues | review threshold={client.intent_confidence_threshold}')
+    else:
+        console.progress('QUOTA', 0, len(requests), f'RPM={client.rpm} | input TPM={client.tpm} | concurrency={client.max_concurrency} | shared async SDK queue')
     signature = digest({'inputs': input_signature(dataset, request_name, client), 'uncertainty': args.uncertainty})
     checkpoint_path = runtime / f'checkpoint-{mode}.json'
     checkpoint = {'signature': signature, 'run_id': datetime.now(timezone.utc).isoformat(), 'results': {}, 'calls': []}

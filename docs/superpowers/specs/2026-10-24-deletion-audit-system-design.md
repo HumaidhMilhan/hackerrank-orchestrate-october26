@@ -1,5 +1,7 @@
 # Ghost Data Still Exists: locked hackathon implementation design
 
+Provider update (25 October 2026): [Groq role routing](2026-10-25-groq-routing-design.md) adds GPT OSS 20B intent classification, independent GPT OSS 120B review for uncertain/conflicting interpretations, and Qwen 3.8 27B media observations. It supersedes the Gemini-only provider configuration below; deterministic policies and output constraints remain locked.
+
 Date: 24 October 2026. Status: decisions locked by the user; CLI implementation complete, with offline verification. Live model/vision validation and accuracy refinement await API configuration.
 
 This document replaces the earlier production-oriented design with the lean decisions finalized stage by stage in the conversation. The target is a viable solution for a 24-hour hackathon. There are four core audit stages and a fifth runner/evaluation layer. The application is a terminal CLI showing progress, current status, warnings, and errors.
