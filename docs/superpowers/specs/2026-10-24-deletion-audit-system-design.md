@@ -1,255 +1,161 @@
-# Ghost Data Still Exists: system design
+# Ghost Data Still Exists: locked hackathon implementation design
 
-Date: 24 October 2026. Status: proposed design for review; implementation has not started.
+Date: 24 October 2026. Status: decisions locked by the user; solution implementation has not started.
 
-This document defines the four-stage deletion-audit system agreed in the design discussion. The user selected guarded identity resolution, an early authorization gate, observations rather than LLM verdicts, cutoff-aware state reconstruction, deterministic final decisions, canonical output ordering, and a bounded investigation loop. Gemini is the preferred initial model provider; Groq or a local model are alternatives if API access, quotas, or capability prove unsuitable.
+This document replaces the earlier production-oriented design with the lean decisions finalized stage by stage in the conversation. The target is a viable solution for a 24-hour hackathon. There are four core audit stages and a fifth runner/evaluation layer. The application is a terminal CLI showing progress, current status, warnings, and errors.
 
-## 1. Purpose and boundaries
+## 1. Goal and implementation boundary
 
-For every request in `dataset/deletion_requests.csv`, determine whether deletion is authorized, investigate the subject's data as of `audit_at`, apply `dataset/deletion_rules.csv`, and produce an evidence-backed assessment and the required future actions. The system reads supplied artifacts and proposes actions. It does not delete source data, connect to production services, or execute remediation.
+Build a runnable Python program that reads participant-facing inputs from `dataset/` and writes root-level `output.csv` with exactly 518 data rows, one per evaluation request, sorted by `case_id`. The exact columns are `case_id,deletion_status,steps_json`.
 
-Success means a terminal command processes the participant-facing corpus and produces the root-level `output.csv`: exactly 518 unique cases, the prescribed three columns, canonical ordering, and valid, grounded steps. Correctness includes identity linkage, time filtering, retained records, tombstones, synchronization, restore paths, citations, and complete verification coverage.
+The program investigates the supplied artifacts and proposes remediation. It does not execute deletion, disable real services, or restore data. Use only participant-facing inputs. Public sample answers are evaluation labels, never prediction inputs, prompts, runtime lookup tables, or hardcoded case branches. Organizer files, generator internals, hidden answers, and case/resource number patterns are excluded.
 
-Predictions must use only participant-facing inputs under `dataset/`. Public sample answers are accessible to evaluation code only. They are not investigation inputs, retrieval documents, prompts, identity links, runtime rules, or cached predictions. Organizer truth, generator internals, hidden labels, case-number patterns, and resource-ID suffix assumptions are excluded.
+Every evaluation case receives a row. Recoverable parser, provider, interpretation, and per-case processing errors use bounded retries and the agreed fallbacks rather than aborting the dataset run. Warnings and estimates are recorded outside the required CSV. Never invent resources, observations, findings, or evidence references to fill missing information.
 
-The agent must not claim a world-wide deletion guarantee from this closed corpus. Its assessment is grounded in the supplied evidence and the challenge's policy and scope.
+## 2. Selected approach and tools
 
-## 2. Approaches considered and selected
+The user selected a four-stage deterministic pipeline with a bounded investigation loop. LLMs interpret request language, extract observations, and clarify evidence. Code applies authorization mapping, identity-link guards, temporal rules, deletion policy, final status selection, step generation, and serialization. Stage 5 runs and evaluates those stages; it introduces no additional adjudicator.
 
-| Approach | Benefit | Tradeoff | Decision |
-| --- | --- | --- | --- |
-| Fixed four-stage pipeline with LLM extraction | Predictable execution and straightforward tests | Cannot adapt well to unexpected missing links or contradictions | Considered, not selected |
-| Four stages with bounded, read-only investigation and deterministic finalization | Can revisit evidence and identity links while preserving enforceable decision rules | Requires explicit gap tracking, budgets, and stopping conditions | Selected by the user |
+The alternatives discussed were a fixed pipeline with no follow-up, local OCR before vision, and conservative INCOMPLETE for all remaining uncertainty. The selected approach uses one targeted recheck, vision for screenshots, local PDF text extraction, and best-evidence estimation for remaining uncertainty. Conservative INCOMPLETE remains an evaluation comparison, not the current default.
 
-An unrestricted LLM adjudicator is excluded because policy enforcement, output correctness, and step order must not depend on unconstrained generated verdicts. A remediation topological sort is also excluded from submission serialization: the user chose the challenge's prescribed sort order.
+Use Python, standard-library CSV/JSON/SQLite/argparse/logging tools, dictionaries and sets, local PDF text extraction, and a small model-provider helper. Use PyMuPDF for PDF text extraction, which is already available in the inspected environment. Shared SQL snapshots are separate in-memory SQLite databases. A small filesystem cache and case checkpoint are sufficient; no hosted database or general-purpose orchestration framework is required.
 
-## 3. Proposed implementation defaults
+Gemini is the initial provider preference. Groq or a local model are alternatives if Gemini access, quota, or capability is unsuitable; implement an alternative only when needed, rather than building three full backends upfront. Exact text/vision model IDs are runtime configuration values and must reflect actual available models. Credentials come only from environment variables or an ignored local `.env`; no credentials enter source, logs, reports, or archives. A consumer subscription is not proof of API entitlement: confirm usable API access and quotas before relying on it. Do not enable billing automatically.
 
-These are design recommendations, not previously agreed user requirements:
+## 3. Stage 1: authorization and guarded identity resolution
 
-| Concern | Proposed default | Reason |
-| --- | --- | --- |
-| Language | Python 3, retaining `code/main.py` | Fits the starter layout and local evidence processing |
-| Storage | SQLite plus in-memory typed records | Supports durable indexes, provenance, checkpoints, and exact queries without a service |
-| Orchestration | Explicit application state machine | Makes tool permissions, budgets, and transitions inspectable |
-| Retrieval | Exact identifier/resource indexes and full-text search | The corpus has only 94 evidence files; exhaustive structured scans are practical |
-| Graph representation | Typed edge tables and adjacency maps | Temporal ownership and process paths do not require a graph database |
-| Schema validation | Typed internal models and JSON Schema at provider boundaries | Rejects malformed or out-of-domain observations |
-| Model access | Provider adapter, Gemini first | Supports the user's existing preference without coupling decision rules to a vendor |
-| Interface | Terminal commands with progress and diagnostics | Satisfies the evaluation contract; no product UI is required |
+### Authorization
 
-Do not add a vector database, hosted database, multi-agent framework, web app, or parallel LLM agents initially. They do not resolve a demonstrated requirement in this corpus. Dependency versions and exact model IDs will be selected and verified during implementation, not guessed in this design.
+Send request text in batches of **20** for LLM interpretation. Return `case_id`, `DELETION` or `NON_DELETION`, and a short supporting phrase copied from the original request. The model does not return a final deletion status.
 
-## 4. Execution structure
+Code validates the labels, supporting spans, and that every requested case appears exactly once. Retry failed, missing, or invalid interpretations once, only for affected cases. Then apply the fallback in this exact order:
 
-There are four case-processing stages. Shared corpus preparation is an optimization supporting Stage 2, not a fifth decision stage.
+1. **Explicit non-deletion / negation check -> NON_DELETION.** Include multilingual negation and clear access/correction/export/marketing-only requests. Match intent and the scope of negation, not isolated keywords.
+2. **Multilingual affirmative deletion stems -> DELETION.** Normalize case and Unicode and cover deletion expressions in the languages present in participant requests. Build general language patterns, not case-specific mappings.
+3. **Final default -> NON_DELETION plus warning.** This is a best-effort fallback and may be less accurate than model interpretation.
 
-1. Prepare a versioned evidence catalog, parser results, identifier indexes, and coverage ledger. Parse once and reuse across cases. Extraction never assigns a deletion verdict.
-2. Stage 1 interprets request intent and applies the authorization gate. Non-deletion requests terminate as `NOT_APPLICABLE`; ambiguous intent remains unresolved. Authorized requests obtain a guarded subject identity graph.
-3. Stage 2 retrieves eligible observations and connected activity, expands resource attribution, and extracts additional facts when necessary.
-4. Stage 3 reconstructs scoped resource states at the cutoff, applies policy, analyzes relevant process paths, and records evidence gaps.
-5. If gaps remain, the controller permits a bounded return to Stage 1 or 2, then reruns affected Stage 3 calculations.
-6. Stage 4 deterministically compiles the assessment, findings, remedies, and verification, validates all output constraints, and records the case result.
-7. The writer publishes the final CSV only after all required cases pass finalization. Per-case results and run progress remain checkpointed across interruption.
+For example, "export my data; do not delete my account" is NON_DELETION, while "export my data, then delete my account" and "do not send confirmation emails; delete my account" authorize deletion. Multilingual affirmative and negated forms require tests.
 
-The model has no tool that sets final status, changes policy, writes `output.csv`, expands its own budget, or executes code. Extracted artifact content is data, including text that resembles instructions.
+Code maps NON_DELETION to NOT_APPLICABLE with `steps_json=[]` and bypasses per-case deletion investigation. DELETION continues to Stage 2.
 
-## 5. Shared data contracts
+### Identity
 
-Internal records can have rich provenance. Public step objects still contain exactly the seven fields required by the challenge.
+Use two indexes: normalized email -> candidate user IDs, and user ID -> known identifiers with their source references. Match the supplied email against current and historical values. Collect emails, phones, hashes, and names connected by explicit ownership to the same stable `user_id`.
 
-| Record | Essential fields |
+Use only information available at or before `audit_at`. Exclude later audit events; a current snapshot updated after the cutoff is not itself proof of the earlier identity. Eligible identity history can supply earlier values. Preserve raw identifiers as well as normalized search values; do not remove email dots/plus tags or invent phone country codes or hash algorithms.
+
+Shared names or phone numbers do not merge subjects. Keep ambiguous candidates separate until evidence establishes ownership. If no identity matches, continue with the supplied request email as the search seed. Resource-history links are discovered in Stage 2, not in a separate graph-building subsystem.
+
+Output: case ID and cutoff, authorization, candidate subject IDs, known identifiers and source references, and warnings.
+
+## 4. Stage 2: evidence observations
+
+### Shared extraction
+
+Read the manifest and actual contents of the **94** artifacts once: **24 SQL, 28 JSON, 26 logs, 11 screenshots, 4 PDFs, and 1 text file**. Reuse parsed content across cases; cache accepted model-assisted extraction by source content and extractor/prompt/model configuration. A failed or partial extraction is recorded as such, not cached as a successful empty result.
+
+| Format | Extraction |
 | --- | --- |
-| `AuditCase` | case ID, request email, request text, requested/reported/audit timestamps, reported claim |
-| `IntentInterpretation` | interpreted action, affirmative/none/uncertain authorization meaning, request-text spans, scope, interpretation method, unresolved issues |
-| `IdentityLink` | subject ID, identifier type, raw and normalized values, relationship type, known validity bounds, evidence references, availability time, accepted/candidate disposition |
-| `EvidenceArtifact` | participant evidence ID, manifest-relative path, format, origin, manifest capture time, content hash, extraction status, parser/prompt version |
-| `Observation` | system, resource, store/replica scope, observed attributes, subject links, observation time, availability time, participant evidence ID, exact locator, observation/claim kind, extraction method |
-| `ResourceAssessment` | subject, system, resource, category, scoped states, selected observations, policy rule, required final state, compliant/violating/unresolved result |
-| `ProcessLink` | process resource, source and destination resources or scopes, user scope, enable/restore state, time, supporting evidence, known/uncertain topology |
-| `InvestigationGap` | case, gap kind, affected resources, why it matters, eligible next tools, attempted queries, resolved/budget-exhausted state |
-| `CaseAssessment` | authorization result, resource assessments, violations, risks, required verifications, coverage result, unresolved issues, internal rationale |
-| `ModelUsage` | run/task IDs, provider, exact model ID, attempt, input/output/cached/other billed token categories, latency, usage source, estimated cost, cache reuse |
+| SQL | Load each snapshot separately into in-memory SQLite; inspect real schemas and retain primary/replica/table scope |
+| JSON | Traverse records, service exports, and nested snapshots; preserve applicable parent and record timestamps |
+| Logs | Extract observations and operation claims; join identifier and result lines using trace IDs and explicit context |
+| Text | Read and parse records/prose with line references |
+| PDF | Extract text from every page locally; use vision only where missing text or layout loses important associations |
+| Screenshot | Use Gemini vision to extract identifiers, resource fields, timestamps, relevant rows, and selected-record details |
 
-Each derived fact stores its dependency references, not just a confidence score. A schema-valid or high-confidence model answer is not sufficient evidence. Locators include SQL table and row key, JSON path, log line and trace ID, PDF page and text span, or screenshot region and extracted text.
+LLM extraction returns observed facts and their source locations, not policy decisions, verdicts, or remediation actions. Preserve null versus missing fields. A workflow badge or successful delete operation is a claim; an actual record read or completed lookup is a scoped observation. Do not interpret a cache miss or arbitrary missing row as deletion.
 
-Citation fields refer to participant-visible `file_id`, `activity_id`, or `audit_id`, never internal observation IDs, generated extraction files, or cache keys. Keep derivation chains internally when an answer needs several artifacts to establish attribution and state.
+Retry failed extraction once; then continue with available content and a warning. Reuse cached media observations across cases rather than calling vision for each person. A text-only fallback model cannot silently replace image interpretation.
 
-## 6. Stage 1: authorization and guarded identity resolution
+### Case retrieval and bounded expansion
 
-### Authorization gate
+1. Search Stage 1's accepted identifiers as complete values rather than substrings.
+2. Collect explicitly connected resource IDs.
+3. Search those resources in evidence and global activity.
+4. Follow explicit links to additional resources for **at most two expansion passes** after the initial search.
 
-Interpret the original `request_text`, including negation, conditions, quoted prior requests, and multilingual expressions. Suggested interpretation actions are deletion of an account/personal data/specific copy, access, correction, export, marketing opt-out, other, or ambiguous. These are internal semantic labels, not output statuses.
+Use resource history to find absent or anonymized resources whose current payload has no identifiers. Historical audit attribution alone does not make a correctly anonymized current payload noncompliant. Do not infer ownership from file names, manifest origin, similar identifiers, or numeric suffixes.
 
-An LLM may interpret language and return exact supporting request spans. Code checks the schema, span validity, contradictory assertions, and whether the interpretation is affirmative deletion authorization. Deterministic mapping then gives:
+Filter evidence capture time and observation/event time against `audit_at` before using observations in a case or sending case context to a model. Later bundles remain ineligible even if they describe earlier events. Keep primary and replica observations separate, and keep ambiguous subjects separate until grounded links resolve them.
 
-- Affirmative deletion: proceed with investigation.
-- Clearly non-deletion: finalize `NOT_APPLICABLE` with an empty array.
-- Uncertain or contradictory meaning: request another bounded interpretation; do not infer authorization from workflow status or intake classification events.
+Output observations contain: participant evidence ID (`file_id`, `activity_id`, or `audit_id`), system/resource IDs when available, capture and observation times, scope, extracted facts, claim/observation kind, and a locator such as table/row, JSON path, PDF page, screenshot region, or log lines. Return extraction/retrieval warnings alongside them. The manifest is a locator, not proof of membership or state.
 
-Constrained extraction does not make language interpretation infallible. Intent correctness is evaluated separately. Model confidence alone cannot authorize a case. Request scope is recorded for interpretation, while required treatment comes from supplied policy rather than invented exceptions.
+## 5. Stage 3: deterministic state, policy, and recreation-risk analysis
 
-### Identity relationships
+### Reconstruct state
 
-Start with the supplied email. Match it against eligible current identities and historical audit values. Follow accepted ownership changes connected to a stable `user_id`, then attach grounded aliases and resource links. Never infer a user or case from an identifier's numeric suffix.
+Group observations by system, resource, and store/replica scope. Exclude later evidence and prefer the latest applicable direct state observation within the same scope. After checking eligible history, carry that observation forward to the cutoff unless later evidence challenges it. This is a supplied-corpus inference, not proof that unrecorded changes are impossible.
 
-Accepted links require explicit ownership evidence: a snapshot field, an identity-change event tied to the user, or a source record/activity explicitly connecting the subject and resource. A matching name or shared phone produces a candidate requiring corroboration, not a subject merge. Resource relationships do not transitively merge two subjects. A historical value remains a discovery key for older copies, not unconditional proof of current ownership of another person's records.
+A later successful-operation claim does not establish the resulting state or override a direct read. A later possible mutation without a confirming read creates uncertainty. Primary absence does not cancel replica presence. Failed extraction, a cache miss, or an incomplete query cannot establish absence. A negative lookup proves only its defined scope; absence from a snapshot requires evidence that its relevant population was completely captured and checked.
 
-Normalize conservatively: retain raw values; normalize Unicode and email case for this dataset; do not strip email dots or plus tags; compare hash strings without inventing hash algorithms; normalize phone punctuation only where country context is established. Do not invent country codes or merge names by transliteration.
+If equally applicable observations conflict, retain the conflict for the targeted recheck and subsequent best-evidence handling rather than describing compliance as verified. Do not impose a universal file-format ranking or invent a snapshot-age threshold.
 
-Only information available by the case cutoff may establish identity. Exclude later audit events. A later-updated identity snapshot is not automatically proof of an earlier value. Earlier eligible audit records may establish historical aliases; unknown interval bounds stay unknown. An unresolved subject collision blocks finalization until investigated.
+### Apply supplied policy
 
-Output: authorization interpretation, accepted subject graph, rejected/candidate links, and any unresolved identity gaps.
+Load `deletion_rules.csv` and implement its conditions in ordinary code. Derive record category from actual metadata, table structure, and document role; an unclear category or condition can be sent back for interpretation. Code selects the applicable rule and treatment.
 
-## 7. Stage 2: observations and multimodal investigation
-
-### Shared preparation and coverage
-
-Read the manifest and actual contents of every artifact, with explicit success, partial, unsupported, and failed extraction states. Preserve capture metadata and content hashes. Global preparation may index all artifacts, but every per-case retrieval must filter availability before delivering results to the model or state engine. A model must not see a later artifact and then be asked to ignore it.
-
-Structured records are exhaustively indexed. Every eligible media artifact must have inspected/extracted content before case coverage is considered complete. File names and manifest origins may locate files but cannot establish case membership or compliant state. Missing/failed extraction remains visible; an empty result from a failed parser is never interpreted as absence.
-
-The prediction loader allowlists input tables and manifest evidence paths. It explicitly excludes `sample_output.csv` and both output templates. Reject evidence paths escaping the dataset evidence directory. Public samples can be processed in evaluation mode with their requests as inputs and their labels opened only by the evaluator.
-
-### Format handling
-
-| Format | Extraction and interpretation |
+| Treatment | Required check |
 | --- | --- |
-| CSV | Preserve source row IDs, UTC timestamps, and field values; parse narrative activity details into candidate links and claims |
-| SQL | Load each snapshot into a separate isolated SQLite database; inspect actual schemas and table scope; retain primary and replica distinctions |
-| JSON | Traverse nested snapshots, service exports, collections, and records; inherit timestamps only from applicable parent scope; preserve null versus missing |
-| Logs | Support structured and free-text layouts; join start/read/completion lines by trace ID and context; distinguish cache misses, retries, and completed source lookups |
-| Text | Parse scoped timestamped records and prose with line locators |
-| PDF | Extract text from every page; inspect layout or use vision where text extraction loses associations or required fields |
-| Image | Use OCR/vision to extract full relevant rows, selected-record panels, timestamps, and identifiers; retain region coordinates and uncertainty |
+| DELETE | Relevant copy is absent |
+| REDACT | Prohibited identifiers are removed while permitted context remains |
+| ANONYMIZE | Current record no longer exposes prohibited attribution through identifiers or links |
+| RETAIN | Required record remains available under the supplied retention/hold condition |
+| ACCOUNT_TOMBSTONE | Preserve permitted stable `user_id`; remove name, email, phone, email hash, and other prohibited direct identifiers |
+| BACKUP_ARCHIVE | Preserve the affected archive and block restoration of prohibited subject data |
 
-SQL loading permits only snapshot construction in the isolated database; disallow attachments, extension loading, and external file access. No model-generated SQL or shell commands are executed. Subsequent inspection queries are generated by application code. Unknown schemas are flagged for adapter extension, not silently skipped.
-
-An LLM extraction response lists observed attributes and their locations. It cannot return policy treatment, case status, or final submission steps. Citation strings and extracted values are checked against the selected source. For visual facts, bounds, text associations, and critical readings receive image/OCR cross-checks where practical. If a crucial field remains unreadable or semantically ambiguous, retain an extraction gap.
-
-### Discovery expansion
-
-Search accepted current/historical identifiers, then grounded resource IDs and related activities. This recovers already-anonymized or absent resources whose current payload has no identifiers. An accepted historical audit link may establish whose resource is being investigated; that historical linkage alone does not mean its current payload violates anonymization policy.
-
-Do not assume all global activity belongs to the subject. Do not assume every appearance of an identifier is a live prohibited record: role, category, scope, timestamp, and policy still need interpretation.
-
-Output: eligible observations, attributed resources, candidate process paths, coverage ledger, and extraction/linkage gaps.
-
-## 8. Stage 3: temporal state reconstruction and policy analysis
-
-### Eligibility and time
-
-Parse timestamps as timezone-aware UTC. For artifacts require manifest capture time at or before `audit_at` and the fact's observation/effective time at or before the cutoff. For activity/audit rows use their event time and any explicit availability restriction. Unknown timestamps that affect eligibility are gaps. A later-exported bundle cannot be cited merely because an embedded record describes an earlier day.
-
-Keep both observation time and availability/capture time. A record's `updated_at` is not always the time at which its presence or absence was observed. A filename date is not authoritative.
-
-### Reconstruct scoped state
-
-Group observations by subject, system, resource, and physical/logical scope. Preserve primary, failover, regional, reporting, and search/index scopes rather than choosing one global latest row.
-
-For comparable observations within a scope, later direct state observations can supersede earlier observations. A later operation claim alone does not supersede direct evidence of record state. Conflicting observations at comparable times and scope remain unresolved unless another grounded fact resolves the conflict. There is no universal rule that SQL outranks screenshots or JSON outranks logs.
-
-Any relevant replica with a prohibited copy can make the logical resource violating. An absence observation proves absence only for its defined lookup, table, snapshot, or completed exhaustive query scope. A single cache miss, missing manifest entry, absent event, or arbitrary row omission does not prove deletion. Inferring absence from a complete snapshot requires evidence that the table/snapshot includes the relevant population and the accepted identifiers/resource were checked.
-
-Evidence can establish state at a point before `audit_at`. Use an explicit corpus-bounded persistence rule: after exhaustively inspecting all eligible history for that resource and scope through the cutoff, carry the latest applicable direct observation forward if no later relevant observation or mutation claim challenges it. A completed search with no such event supports this inference within the supplied corpus; it does not prove that unrecorded real-world changes are impossible. Do not invent a fixed snapshot-age limit or require a new observation exactly at the cutoff.
-
-Apply subsequent relevant evidence and events before the cutoff, but do not simulate successful changes from operation reports alone. A later mutation claim capable of changing compliance creates a gap until direct evidence or other sufficient grounded state evidence resolves it. A purely informational event does not invalidate the prior state. The latest timestamp is not automatically proof of current truth. The persistence inference, examined interval, covered sources, and scope are recorded in the assessment rationale.
-
-### Policy registry
-
-Load `deletion_rules.csv` at runtime. Implement reviewed predicates for the supplied conditions; the source rule IDs, conditions, and required actions remain the policy authority. Unknown categories, changed conditions, conflicting applicable rules, expired retention without a replacement rule, and insufficient condition evidence produce gaps rather than guessed defaults.
-
-| Category/rule group | Required treatment and assessment |
-| --- | --- |
-| Profile, secondary identifier, search, cache, subject-only attachment, export, marketing | Require absence where the applicable rule is DELETE |
-| Shared support message | Keep context; remove prohibited identifying fields under REDACT |
-| Analytics and telemetry | Remove current attributable fields/linkage under ANONYMIZE; empty email alone is insufficient if another prohibited identifier remains |
-| Email delivery log | Redact identifying fields required by the applicable rule |
-| Security record in retention / active legal hold | Preserve required record and permitted fields; do not invent a delete remedy |
-| Backup archive | Preserve the archive under RETAIN and require effective blocking of restoration of the subject's prohibited data |
-| Account tombstone | Preserve permitted stable user reference; remove name, email, phone, email hash, and other prohibited direct identifiers |
-
-For tombstones, identify the tombstone from actual account state and reference requirements. Do not assume every remaining account row qualifies. Incomplete compliance with a REDACT or ANONYMIZE rule creates an exposed-PII violation. Missing required retained data is a policy failure, but the allowed output vocabulary has no generic restore-retained-record action: if encountered, raise an explicit representability gap rather than invent an operation.
+Inspect fields rather than trusting a "redacted" or "anonymized" label. A surviving hash or prohibited subject reference can still identify the person. A surviving account row qualifies as a tombstone only when its state and purpose establish that category. Do not invent extra deletion or redaction obligations for records that the supplied policy permits retaining.
 
 ### Sync and restore paths
 
-Build only evidence-backed process relationships. Determine whether an active path can carry the subject's prohibited data, considering source content, destination, scope filters, exclusions, and restore suppression. An active unrelated connector is not automatically a risk; a generic enabled flag may need further investigation. An unknown topology is not proof of safety.
+Use an adjacency map of evidence-backed source/process/destination links. Follow paths with a visited set, including cycles, to identify active subject-related sync, import, replication, or restore processes capable of recreating prohibited data. Exclude unrelated processes and paths preserving only permitted data. An unknown path is not automatically safe.
 
-Follow paths transitively across connected systems. Cycles do not require a remediation topological sort: analyze reachability with a visited set, identify the relevant active process resources, and require their disabling or effective restore blocking. A benign path that only preserves permitted records is not a prohibited recreation path.
+Record required disabling or restore blocking. This graph identifies risks; it never topologically sorts the submitted remediation array.
 
-Output: policy assessments, established violations and risks, required final-state checks, and unresolved gaps. Stage 3 may calculate compliance predicates; it does not serialize or ask an LLM to select the final status.
+### One targeted recheck
 
-## 9. Bounded investigation controller
+Allow **one targeted return to Stage 2 per case**, bundling relevant questions. Re-read existing rows, traces, pages, or images first; use model interpretation only if needed. Do not start an unbounded investigation loop or add another general adjudicator.
 
-The controller owns a case work queue. It chooses a concrete gap, permits the model to propose an allowlisted read, validates its arguments against eligible IDs and case scope, executes it, merges supported observations, and reruns affected identity/state calculations.
+After rechecking, preserve supported observations and unresolved warnings and continue. Output each resource/process's state, applicable rule, required treatment, selected supporting evidence, and internal `COMPLIANT`, `VIOLATION`, or `UNCERTAIN` assessment. These are not new public statuses. Never create facts or citations to fill a gap.
 
-Allowlisted tools are:
+## 6. Stage 4: deterministic decision and output
 
-- `search_identifiers`: exact aliases in eligible indexed content, with context.
-- `find_resource_history`: scoped activity and observations for a resource.
-- `read_evidence`: bounded eligible text/rows/JSON nodes.
-- `inspect_media`: a specified page or image region plus enough surrounding context.
-- `trace_process_path`: evidence-backed source/destination relationships.
-- `compare_scope_states`: eligible observations across named replica/store scopes.
+Stage 4 has no LLM calls. It selects status, generates steps from fixed templates, validates them, and produces one result per case.
 
-The tools accept typed parameters, not free-form code. They provide deterministic pagination and explicit truncation flags. The controller drains required pages or leaves a coverage gap. Tool results cannot change the request, policy, evidence registry, or case cutoff. The model can identify possible gaps, but code owns gap closure and budget accounting.
+### Status precedence
 
-Proposed initial defaults, adjustable after sample evaluation:
-
-| Limit | Default |
+| Condition, evaluated in order | Output |
 | --- | --- |
-| Investigation rounds per case | 3 |
-| Read tools per round | 4 |
-| Investigation interpretation calls | At most 1 per round |
-| Additional schema-repair calls for investigation | At most 1 per case |
-| Intent interpretation calls | At most 2 including repair/review |
-| Extraction attempts per shared model-assisted artifact task | At most 2 including repair |
+| Stage 1 NON_DELETION | NOT_APPLICABLE with `[]` |
+| Any supported policy violation or prohibited recreation risk | INCOMPLETE |
+| All required treatments supported as compliant, no unresolved issue | COMPLETE |
+| Remaining uncertainty, at least one supported compliant direct-state assessment, and no established violation | Estimate COMPLETE; record the reason and uncertainty outside the CSV |
+| No usable state evidence or no supported basis for a completion estimate | Last-resort INCOMPLETE with warning and available supported steps, possibly `[]` |
 
-Thus case-specific semantic calls have a default maximum of six, separate from shared extraction work. Provider transport retries are separately bounded and counted; a successful response followed by semantic repair is a new model call. Shared extraction tasks also have configurable input/output and global spend limits. Each prompt has a size ceiling; application pagination must not silently truncate evidence needed to close a gap.
+One violation outweighs any number of compliant records. Do not use majority voting, reported workflow status, or operation success as proof. Best-evidence estimation is the user-selected initial fallback; it is not the same as verified completion.
 
-Stop when supported facts reach a fixed point and all material gaps are closed, or when an explicit budget, quota, error, or repeated-no-progress condition is reached. Deterministic indexing and required scans are not skipped because the agent loop has run out of calls. Exhaustion checkpoints an unresolved case. It does not create a fourth CSV status, an empty COMPLETE verification set, or invented INCOMPLETE findings.
+Estimated COMPLETE can fail the challenge requirement to prove every relevant treatment. Sparse INCOMPLETE fallbacks can lack a complete supported remediation plan. These are explicit scoring limitations of always producing a row under unresolved evidence; never conceal them by inventing steps. Record estimated case IDs, reasons, unresolved facts, and whether an exception fallback was used in diagnostics. Missing knowledge cannot be eliminated by deterministic rules alone.
 
-An unresolved case is an engineering failure to finish that case. The run can resume with corrected adapters, more quota, or configured fallback. There is no truthful universally valid forced-label fallback. A final full-dataset run succeeds only when all 518 cases are resolvable and valid. Partial diagnostics must not be presented as the completed submission.
+### Step templates
 
-## 10. Stage 4: deterministic decisions and output compilation
-
-### Decision rules
-
-Let A mean affirmative deletion authorization; V the established policy violations or prohibited recreation risks; G material unresolved issues; and C the evidence coverage needed for all discovered obligations.
-
-| Condition | Result |
-| --- | --- |
-| Clearly non-deletion intent | NOT_APPLICABLE and `[]` |
-| Uncertain intent | Unresolved internally; no fabricated final row |
-| A, no material G, complete C, at least one V | INCOMPLETE |
-| A, no material G, complete C, no V, every required treatment and retained record positively supported | COMPLETE |
-| Any other combination | Unresolved internally; investigate or resume |
-
-A single proven violation can establish that deletion is incomplete even before the investigation finishes. However, finalizing its row still requires the full findings, remedies, and verification coverage. A model self-assessment of completeness never satisfies C.
-
-Coverage means all eligible artifacts have usable extraction or a resolved reason they cannot affect this case, accepted aliases and grounded resource histories have been searched, relevant scopes/processes are accounted for, and no candidate link or contradiction capable of changing the output remains. This is a corpus-bounded proof obligation, not a numerical confidence threshold or a claim that unknown real-world stores were searched.
-
-### Step generation
-
-| Assessed issue | Finding | Remediation | Verification |
+| Established issue | Finding | Remediation | Verification |
 | --- | --- | --- | --- |
-| DELETE-required record present | REPORT_REMAINING_RECORD / PRESENT | DELETE_RECORD / ABSENT | VERIFY_RECORD_ABSENT / ABSENT |
-| REDACT-required identifiers present | REPORT_EXPOSED_PII / PRESENT | REDACT_RECORD / REDACTED | VERIFY_RECORD_REDACTED / REDACTED |
-| ANONYMIZE-required attribution present | REPORT_EXPOSED_PII / PRESENT | ANONYMIZE_RECORD / ANONYMIZED | VERIFY_RECORD_ANONYMIZED / ANONYMIZED |
-| Prohibited active copy process | REPORT_ACTIVE_DATA_FLOW / ACTIVE | DISABLE_DATA_FLOW / DISABLED | VERIFY_DATA_FLOW_DISABLED / DISABLED |
-| Prohibited restore path | REPORT_RESTORE_RISK / ACTIVE | BLOCK_RESTORE / BLOCKED | VERIFY_RESTORE_BLOCKED / BLOCKED |
+| DELETE-required copy present | REPORT_REMAINING_RECORD / PRESENT | DELETE_RECORD / ABSENT | VERIFY_RECORD_ABSENT / ABSENT |
+| REDACT-required identifiers exposed | REPORT_EXPOSED_PII / PRESENT | REDACT_RECORD / REDACTED | VERIFY_RECORD_REDACTED / REDACTED |
+| ANONYMIZE-required attribution exposed | REPORT_EXPOSED_PII / PRESENT | ANONYMIZE_RECORD / ANONYMIZED | VERIFY_RECORD_ANONYMIZED / ANONYMIZED |
+| Prohibited active copy flow | REPORT_ACTIVE_DATA_FLOW / ACTIVE | DISABLE_DATA_FLOW / DISABLED | VERIFY_DATA_FLOW_DISABLED / DISABLED |
+| Unsafe restore path | REPORT_RESTORE_RISK / ACTIVE | BLOCK_RESTORE / BLOCKED | VERIFY_RESTORE_BLOCKED / BLOCKED |
 
-Also generate required verification for compliant records/processes in the established case scope: absent records, retained records, redacted/anonymized records, disabled flows, and blocked restores. Public samples demonstrate that verification can extend beyond the resources being remediated.
+Also generate required verification for already-compliant resources in the established case scope. Ordinary retained security/legal records use VERIFY_RECORD_PRESENT / PRESENT. Tombstones use VERIFY_RECORD_REDACTED; backup archives use VERIFY_RESTORE_BLOCKED. Preserve their required reference/archive as part of the specialized check without mechanically adding duplicate PRESENT checks.
 
-Project obligations onto the most specific required terminal check. Ordinary retained security/legal records use VERIFY_RECORD_PRESENT; tombstones use VERIFY_RECORD_REDACTED; backup archives use VERIFY_RESTORE_BLOCKED. Preservation of the archive or stable tombstone reference is still checked internally and is part of the specialized check's meaning. Do not mechanically add a duplicate VERIFY_RECORD_PRESENT for every resource with a preservation obligation. For a backup, evidence of blocking must concern the existing affected archive or its effective subject suppression, not an unrelated deny rule.
+- COMPLETE: verification only, each backed by eligible evidence. Even an estimated completion cannot invent checks for unread resources or use an empty array as proof.
+- INCOMPLETE: supported findings, required remedies, and the available required future verification set. Findings cite proving evidence; all remediation and all future verification use `evidence_id=""`, including checks of already-compliant retained resources.
+- NOT_APPLICABLE: `[]` only.
 
-For COMPLETE, output only the evidence-backed verification set. For INCOMPLETE, output findings for every established issue, all required remediation, and the entire required future verification set. All remediation and all verification in an INCOMPLETE case use `evidence_id=""`, including checks concerning already-compliant retained records. Findings and COMPLETE checks cite eligible participant evidence proving the stated fact.
+Select the latest applicable direct observation that proves the assertion in its scope; break equivalent-proof ties deterministically by evidence ID and locator. A replica-presence finding cites the replica evidence, not the primary-absence result. Preserve additional identity/derivation references internally when one public citation needs contextual linkage. If an issue cannot be represented with an allowed operation, record the limitation rather than invent an operation.
 
-Deduplicate by phase, operation, system, resource, and target state. Multiple observations of one logical violation do not create duplicate remedies. Preserve scope-specific proof internally; do not invent replica resource IDs absent from the sources.
+### Canonical ordering and validation
 
-### Canonical order is authoritative
-
-Sort first by phase rank, then the operation rank below, then `system_id` and `resource_id` ascending as literal strings. Assign consecutive step numbers only after sorting. Sort case IDs as literal strings; do not extract their numeric suffixes to redefine the specified ordering.
+Sort by phase, then the operation sequence below, then `system_id`, then `resource_id`, using ascending literal strings. Deduplicate equivalent logical steps and assign consecutive numbers after sorting. Case IDs also sort as literal strings.
 
 | Phase | Operation sequence |
 | --- | --- |
@@ -257,110 +163,94 @@ Sort first by phase rank, then the operation rank below, then `system_id` and `r
 | REMEDIATION | DISABLE_DATA_FLOW, BLOCK_RESTORE, DELETE_RECORD, REDACT_RECORD, ANONYMIZE_RECORD |
 | VERIFICATION | VERIFY_RECORD_ABSENT, VERIFY_RECORD_PRESENT, VERIFY_RECORD_REDACTED, VERIFY_RECORD_ANONYMIZED, VERIFY_DATA_FLOW_DISABLED, VERIFY_RESTORE_BLOCKED |
 
-Do not run a topological sort, add intermediate verification steps out of phase, or apply downstream-first tie breakers to the submitted array. The prescribed order already puts disabling and blocking before record changes. Keep grounded dependency concerns in the internal explanation and diagnostics. If a demonstrated execution dependency conflicts with canonical serialization, report that limitation in diagnostics while retaining the user's chosen canonical output order. This audit system does not execute the plan or claim the array alone guarantees safe execution under contradictory constraints.
+Canonical order is authoritative. Do not add downstream-first tie breakers, topological sorting, or intermediate checks out of phase. Disabling and blocking precede record changes through the prescribed ranks. The program proposes actions and does not claim to execute a dependency-safe live workflow under conflicting constraints.
 
-### Evidence selection
+Every step has exactly: `step_no`, `phase`, `system_id`, `resource_id`, `operation`, `state`, `evidence_id`. Validate field types, operation/state combinations, evidence eligibility, supported attribution, numbering, ordering, and JSON serialization. Repair malformed steps from templates, or exclude unsupported steps with a warning and reapply status rules. Never suppress the case row. Semantic uncertainty remains visible in diagnostics rather than being falsely reported as verified compliance.
 
-Select an eligible direct observation that proves the output assertion in its relevant scope. Use the latest applicable proving observation when it supersedes older ones; for equivalent proofs prefer an explicit resource observation with precise locator, then a deterministic evidence-ID/locator tie break. Recency does not make a claim stronger than a state observation. A replica-present finding cites the replica evidence rather than a primary-absence result. Do not choose citations to imitate sample labels.
+## 7. Stage 5: CLI runner, evaluation, and deliverables
 
-The internal derivation can include multiple evidence references even though a public step has one evidence ID. The selected citation must actually establish the asserted state; other links establish attribution and context. If no single permitted citation can substantiate the output assertion, retain a representability/evidence gap rather than invent a combined ID.
+### Execution and console behavior
 
-## 11. Final validation and artifact writing
+Use one CLI runner around the four stages. Resolve dataset/output paths from the repository root, not the shell's current directory. Use standard-library `argparse` and `logging`; the CLI does not require a dashboard or terminal UI framework.
 
-Validate schema and semantics before any result is accepted:
+The CLI must show:
 
-- Exact CSV columns, allowed status, unique expected case IDs, sorted order, and 518 rows in final evaluation mode.
-- JSON array only; exactly the seven allowed step fields; correct types, consecutive numbering, canonical order, and operation/state/phase compatibility.
-- NOT_APPLICABLE has no steps; COMPLETE contains verification only; INCOMPLETE contains supported findings and complete remedies/checks.
-- Every nonempty evidence ID exists in the participant registry, is eligible at the cutoff, and supports the stated assertion and attribution chain.
-- Every remedy has a policy-supported issue; every required treatment and process has verification; retention and tombstone constraints are preserved.
-- No unresolved identity, temporal, extraction, policy, representation, or coverage issue is hidden by finalization.
+- Run mode, request count, provider and model names when configured, and preparation status.
+- Evidence extraction progress: completed/total files and cache hits.
+- Case progress: completed/total, current case ID, current core stage, and running COMPLETE/INCOMPLETE/NOT_APPLICABLE counts.
+- Current activity such as interpreting an intent batch, reading evidence, assessing policy, performing the one recheck, or writing output.
+- Visible warnings/errors with case or evidence IDs, a short sanitized explanation, and the recovery action: retry, fallback, skipped unsupported observation, or resume.
+- A final summary: elapsed time, rows written, status counts, estimated/fallback case counts, warnings/errors, model-call/token totals, and paths to output and reports.
 
-Write a temporary CSV in the destination directory and replace root `output.csv` atomically only after every row validates. On failure, leave an earlier valid output untouched, return a failing exit status, and identify the current run as failed so an old output cannot be mistaken for a new result. Sample runs and diagnostic partial files use separate explicit paths. Never modify `dataset/output.csv` or any participant input.
+Progress/status goes to stderr. CSV is written to a file, never mixed with terminal logs. Interactive terminals may refresh one progress line; redirected/non-interactive runs receive ordinary newline messages. `--quiet` hides routine progress, not warnings/errors or the final summary. `--verbose` adds diagnostic detail without leaking secrets or raw provider credentials. Print case IDs rather than personal identifiers in routine progress.
 
-## 12. Provider access, fallback, quotas, and cost
+Proposed interface, now fixed as implementation defaults:
 
-The user has a Gemini Pro subscription. This is a preference and possible development benefit, not verified API entitlement. Google's current documentation distinguishes AI Studio subscription benefits from direct Gemini API billing and quotas. Some eligible subscribers may receive Cloud credits with additional requirements. We have not inspected this user's account, billing, model availability, or limits. [Google AI plans](https://ai.google.dev/gemini-api/docs/google-ai-plans)
+```text
+python code/main.py                         # full run -> output.csv
+python code/main.py --samples               # 32 samples -> sample_predictions.csv
+python code/main.py --resume                # resume compatible full-run checkpoint
+python code/main.py --samples --resume      # resume compatible sample run
+python code/main.py --quiet                 # compact console output
+python code/main.py --verbose               # additional diagnostics
+python code/evaluation/main.py              # sample/custom evaluation and reports
+```
 
-Implementation starts with a small API preflight using credentials supplied through environment variables: confirm authentication, one text schema task, one image task if needed, response usage metadata, and the project's available model limits. Do not enable paid billing or assume unlimited/free API usage. The exact model must be configured from actually available IDs and recorded for every response. Text and vision may use different model IDs where appropriate.
+`--quiet` and `--verbose` are mutually exclusive. These commands describe the application to implement; the starter entry points are currently empty.
 
-Use a provider interface with structured interpretation/extraction, optional image inputs, capability inspection, response normalization, and usage accounting. Gemini is the first implementation target. Groq and local backends use the same internal schemas when configured; their exact models and capabilities remain to be tested. A text-only fallback cannot silently stand in for visual extraction. Unsupported tasks stay unresolved or use a separately validated extraction path.
+Run shared extraction once, use the agreed retry limits, and checkpoint each finished case. Cache/checkpoint files and diagnostics live in an ignored root runtime directory outside `code/`. Reuse checkpoints only when inputs, policy/code configuration, and selected model/prompt settings are compatible. An interrupted run can resume without repeating accepted model extraction. Do not label a checkpoint or partial diagnostic file as the completed 518-row submission.
 
-Google documents request-per-minute, input-token-per-minute, and request-per-day limits at project level, with active limits visible in AI Studio. Configure a conservative single-worker start, a project/model-aware limiter, bounded exponential backoff with jitter for transient errors, and resumable checkpoints for daily exhaustion. Do not create extra API keys to bypass project quotas. [Gemini API rate limits](https://ai.google.dev/gemini-api/docs/rate-limits)
+Catch recoverable per-case processing errors, log them visibly, and pass the best available context through Stage 4's fallback so later cases continue. When all requests have rows, validate exact expected case coverage and write sorted CSV. A successfully completed run exits 0 even if it used documented fallbacks; actual inability to read mandatory inputs or write an output is reported clearly as a command failure rather than pretending a valid artifact exists. The always-output requirement assumes readable inputs and writable output storage; it does not justify fabricated case IDs.
 
-The initial cost policy is free-tier-first when the account and selected model support it; no numeric paid budget has been supplied. A nonzero paid-spend ceiling must be explicitly configured before a paid full run. Fallback uses only configured endpoints/credentials and never signs up for services or changes billing. Provider changes are recorded, not hidden. Re-evaluate interpretation quality when a fallback model is introduced.
+### Evaluation
 
-Cache accepted extraction and interpretation responses by content hash, schema/prompt/parser versions, exact model ID, task, and all relevant cutoff/scope inputs. Failures and truncated results are not reusable successes. Reuse shared media extraction across cases; keep case eligibility filtering separate. Warm caches improve reproducibility but do not guarantee fresh model calls are deterministic.
+Generate sample predictions without reading sample labels. Only the evaluator opens `sample_output.csv`. Compare parsed JSON, ignoring whitespace and object-key order while retaining array order.
 
-Structured outputs improve format consistency; local validation still checks meaning, provenance, enums, and evidence eligibility. [Gemini structured outputs](https://ai.google.dev/gemini-api/docs/structured-output)
-
-Usage reporting separates actual final-run calls/tokens/cost from reused-cache construction costs. Count successful, retried, repaired, and failed calls where usage is reported. Include provider-reported billed categories, actual versus estimated token counts, exact model names, and cached token pricing where relevant. Shared extraction cost is reported once overall and allocated across cases for averages without double counting. A free-tier call may have zero monetary cost while still consuming tokens and quota. Local compute is described separately from API charges. Missing usage is explicitly estimated or marked unavailable rather than recorded as zero.
-
-## 13. Proposed source boundaries
-
-This is an intended module map, not files to scaffold before the design is accepted.
-
-| Module | Responsibility |
+| Metric | Definition |
 | --- | --- |
-| `code/main.py` | CLI, path resolution, run lifecycle, progress, exit status |
-| `code/audit/contracts.py` | Typed records, enums, output schema |
-| `code/audit/config.py` | Provider roles, limits, non-secret settings, environment access |
-| `code/audit/inputs.py` | Allowlisted CSV and manifest loading |
-| `code/audit/identity.py` | Intent gate mapping and guarded identity graph |
-| `code/audit/evidence/` | Format adapters, provenance, extraction coverage, exact/full-text indexes |
-| `code/audit/state.py` | Eligibility, scoped timelines, contradictions, effective state |
-| `code/audit/policy.py` | Supplied rule loading and reviewed predicates |
-| `code/audit/flows.py` | Relevant sync/restore reachability and risk assessments |
-| `code/audit/investigation.py` | Gap queue, allowlisted tools, bounded loop, stopping criteria |
-| `code/audit/decision.py` | Deterministic case decision, supported step generation, canonical sorting |
-| `code/audit/validation.py` | Independent structural and semantic checks |
-| `code/audit/providers/` | Gemini adapter and configured fallback implementations |
-| `code/audit/prompts/` | Versioned intent, observation, visual extraction, and investigation instructions |
-| `code/audit/run_store.py` | Checkpoints, caches, hashes, run manifests, usage ledger |
-| `code/evaluation/main.py` | Label-isolated sample evaluator and participant-created fixtures |
+| Status accuracy | Correct statuses / labeled cases |
+| Step precision/recall | Exact multiset matches of step content excluding step_no, retaining phase, operation, system, resource, state, and evidence ID; report F1 as well |
+| Field accuracy | Matching values among the seven fields at aligned array positions; missing/extra positions count as seven mismatches |
+| Sequence accuracy | Exact ordered step-array equality, including step numbers and citations |
+| Exact row accuracy | Correct status and complete parsed step array |
 
-Run caches and diagnostics live in an ignored root runtime directory outside `code/`; they are excluded from packaging. Prompts, setup instructions, tests, and required Markdown reports are included in the runnable archive. No framework orchestration state is required outside the project.
+For empty expected and predicted step arrays, count their sequence/field/step comparison as correct. If only one array is empty, its step and field comparison scores zero. Report sample and custom-fixture metrics separately; do not claim measured hidden accuracy for the 518 unlabeled evaluation cases.
 
-Proposed CLI responsibilities are preflight, prepare/index, audit samples, audit evaluation, resume a run, validate output, evaluate samples/custom fixtures, and produce usage reports. Exact command syntax is left to the implementer and documented in README. Production mode is unable to load sample labels. Strict reproduction mode uses only compatible cached accepted model responses and fails on missing cache entries; live mode records any newly generated interpretations.
+Reuse the same saved Stage 3 assessments to compare best-evidence versus conservative-INCOMPLETE handling on uncertain sample cases, without more API calls. Inspect errors before changing a rule. If estimates cause false COMPLETE decisions, change the general uncertainty branch to INCOMPLETE; fix extraction/identity/policy bugs at their source. Never choose a per-case rule from its sample answer.
 
-## 14. Evaluation and acceptance
+Create at least four small independent fictional fixtures: multilingual affirmative/negated deletion, primary absence with replica presence, a tombstone with a permitted stable reference and prohibited identifier, and after-cutoff evidence that must not affect the result. Include malformed-model/API-failure and CLI warning/progress checks in the relevant tests. Expected custom results belong in source and the Markdown evaluation report, not only ignored raw data formats.
 
-Use all 32 labeled samples as the public regression suite while recognizing that they contain no NOT_APPLICABLE examples. Hidden evaluation labels are unavailable; do not claim measured 518-case accuracy.
+### Usage and packaging
 
-Report these clearly defined local metrics:
+Track actual provider/exact model names, calls, input/output tokens, cache reuse, and estimated costs. Count retries and schema-repair calls as actual calls; distinguish unknown usage from zero. Separate sample/development usage from the final full-dataset run. Report shared extraction once, disclose reuse from earlier runs, and compute the full-run per-request averages over 518 without double counting cached work. A free monetary cost does not mean zero tokens or quota consumption. Use verified model rates when available and label cost estimates.
 
-- Case status accuracy: correct status / labeled cases.
-- Exact row accuracy: status and complete parsed step array both match.
-- Step precision/recall/F1: exact step-content matches after excluding step number for this diagnostic; retain all other fields including evidence ID. Report numerator/denominator and treatment of empty arrays.
-- Field accuracy: match the seven fields at aligned step positions; missing or extra positions count as mismatches. Provide per-field values so sequence and content mistakes can be distinguished.
-- Sequence accuracy: exact equality of the complete ordered parsed step array, including step numbers and citations.
-- Diagnostic semantic content comparison ignoring citation choice or order, explicitly secondary to exact metrics, to explain equivalent-proof and serialization errors rather than replace them.
+Write required metrics, custom cases, failures, and improvements directly into `code/evaluation/evaluation_report.md`. Write final-run provider/model/call/token/cost totals and per-request averages directly into `code/evaluation/usage_report.md`. Maintain append-only root `log.txt` for the conversation transcript. The runner must not claim these reports exist or contain results before they are actually generated.
 
-Create independent fictional fixtures, with expected answers directly visible in source/Markdown, covering at least:
+Before packaging, check row count and exact case coverage, headers, statuses, JSON, step fields/order, evidence references, and warning/estimate counts. Build `code.zip` with runnable code, prompts/configuration, README, tests, and both reports. Exclude dataset files, caches, checkpoints, virtual environments, credentials, and nested archives. Report output/archive paths in the CLI. Do not upload or submit artifacts automatically.
 
-1. Multilingual deletion authorization, a negated deletion request, and a marketing-only opt-out.
-2. A profile absent from primary but present in an eligible replica; successful delete claims do not override it.
-3. A tombstone that must retain `user_id` but still exposes an email hash and must be redacted.
-4. An active connector or backup able to recreate prohibited data, including canonical disabling/blocking order.
-5. A compliant retained security record and legal-hold record with valid retention evidence.
-6. Evidence captured after the cutoff that would reverse the answer if incorrectly admitted.
-7. Shared/reassigned identifiers and an anonymized resource attributable only through eligible history.
-8. Contradictory same-scope observations, parser failure, exhausted quota, and unreadable media; each must remain unresolved rather than fabricate a submission row.
+## 8. Lean implementation boundaries and build order
 
-Check invariants: CSV row shuffling does not change results; JSON object-key order is irrelevant; adding unrelated records does not change a case; adding after-cutoff evidence does not change a case or its model context; cold and resumed runs agree given the same accepted interpretations; duplicate observations do not duplicate steps; grounded aliases can expand discovery without merging subjects.
+Keep a small source layout:
 
-Use evaluation findings to change general parser, policy, state, or interpretation behavior. Do not introduce sample-case or evaluation-family branches. Record failures and improvements directly in `code/evaluation/evaluation_report.md`; usage and cost go directly in `code/evaluation/usage_report.md`. Maintain the root conversation log separately. Packaging follows README: include runnable code, prompts, setup, and both reports; exclude the dataset, caches, environments, credentials, and nested archives.
+| File | Responsibility |
+| --- | --- |
+| `code/main.py` | CLI, progress, shared preparation, case loop, checkpoint/resume, output writing |
+| `code/stage1.py` | Batched intent interpretation, fallback, guarded identity indexes |
+| `code/stage2.py` | Format extraction, observation cache, scoped retrieval and link expansion |
+| `code/stage3.py` | State reconstruction, policy checks, relevant flow/restore analysis, one recheck |
+| `code/stage4.py` | Deterministic status rules, step templates, canonical sorting and validation |
+| `code/llm.py` | Gemini/configured provider calls, response validation, retry helper and usage accounting |
+| `code/evaluation/main.py` | Public/custom evaluation, uncertainty comparison and reports |
+| `code/tests/test_pipeline.py` | Focused policy, fallback, temporal, serialization and CLI regression tests |
 
-Acceptance requires a clean end-to-end run producing all 518 valid rows with no unresolved material gaps, a successful independent output validator, reproducible checkpoint/resume behavior, completed reports, and an inspected archive. Passing format checks is not a substitute for semantic evaluation.
+Use plain internal dictionaries/sets for case contexts, observations, and assessments. Keep prompts in source or Markdown so the code judge can inspect them. Add a shared model/helper file only if repeated structures make it necessary; do not scaffold a framework in advance.
 
-## 15. Remaining choices and known limits
+Implementation order is: Stage 1 plus basic CLI/provider helper; shared extraction and Stage 2 retrieval; Stage 3 rules and recheck; Stage 4 output and fixed templates; Stage 5 integration/evaluation/usage reporting; final sample fixes, full run, and packaging. Tests focus on real failure modes rather than mirroring reversible implementation details. No extra design approvals or architecture expansion are required by this document; these are the finalized decisions the user asked to lock.
 
-The selected architecture and canonical ordering are settled. Python, SQLite, explicit orchestration, initial loop limits, and the proposed module boundaries are recommendations in this document. Provider/model IDs, actual quota, numeric paid budget, local hardware, and fallback vision capability are not yet verified. The implementer may choose extraction libraries, test tooling, and small module organization details without changing the architecture.
+## 9. Acceptance and known limitations
 
-The design cannot guarantee perfect language/visual interpretation, prove stores absent from the supplied corpus, invent remediation operations missing from the allowed vocabulary, or force a truthful complete submission out of irreducibly ambiguous evidence. These limits are made explicit so that implementation cannot disguise them as confident statuses.
+Implementation is ready for submission when the CLI completes a full run with all 518 unique sorted case rows, structural validation passes, public/custom evaluation and uncertainty-policy comparison have been run, actual usage/evaluation reports are present, and the code archive has been inspected. Estimated and fallback cases must be visible in diagnostics and reports even when CSV structure is valid.
 
-The next deliverable after design acceptance is an implementation plan with milestones, tests, provider preflight, and measurable exit criteria. No solution code or dependency installation is authorized by this design document alone.
+The 24-hour constraint is a scope constraint; the repository does not configure an official challenge end time. Exact API access, model IDs, quotas, and available credits remain runtime facts to verify, not reasons to reopen the architecture. No numeric paid API budget was supplied and the program must not enable paid billing automatically.
 
-## 16. Design review record
-
-An independent builder review checked whether the document could support an implementation plan. It identified one consequential ambiguity: whether a direct observation can persist to the audit cutoff when no superseding evidence exists. Section 8 now explicitly defines corpus-bounded persistence after complete eligible history inspection, together with mutation-claim and scope guards. This is the author's proposed resolution and should be reviewed alongside the implementation defaults. No other consequential unanswered planning questions were identified by that review. This is a design review, not a claim that the unimplemented system passes tests or achieves a measured accuracy.
+The selected estimates and last-resort rows guarantee coverage under recoverable uncertainty, not perfect semantic accuracy. An unread artifact or mistaken language interpretation can still affect scoring. Evaluation can justify a general fallback change, but neither a successful CLI run nor matching the public samples proves hidden-dataset accuracy.
