@@ -20,6 +20,8 @@ The alternatives discussed were a fixed pipeline with no follow-up, local OCR be
 
 Use Python, standard-library CSV/JSON/SQLite/argparse/logging tools, dictionaries and sets, local PDF text extraction, and a small model-provider helper. Use PyMuPDF for PDF text extraction, which is already available in the inspected environment. Shared SQL snapshots are separate in-memory SQLite databases. A small filesystem cache and case checkpoint are sufficient; no hosted database or general-purpose orchestration framework is required.
 
+User-directed async/quota update: use Google's `google-genai` async client behind one shared queue; message tasks and audit stages enqueue work instead of invoking the SDK directly. Default `GEMINI_MODEL=gemini-3.6-flash`, `GEMINI_RPM=5`, `GEMINI_TPM=250000`, and `GEMINI_MAX_CONCURRENCY=2`, all configurable through environment variables or the ignored `.env`. Preserve optional separate text/vision overrides. The scheduler enforces rolling 60-second request and generation-input-token reservations plus concurrent-operation limits. Route token counting, generation, and every retry through it; cache token counts and accepted responses. Count-token utility calls consume local RPM/concurrency, while generation reserves provider-counted contents plus conservative schema/config overhead against TPM. Keep failed-attempt reservations and raise them if actual prompt usage is larger. Disable SDK built-in retries and automatic function calling to prevent unscheduled extra requests. The existing synchronous CLI uses a bridge to this async queue; concurrent producers can await it directly. Groq remains an alternative only if scheduled Gemini access is unsuitable.
+
 Gemini is the initial provider preference. Groq or a local model are alternatives if Gemini access, quota, or capability is unsuitable; implement an alternative only when needed, rather than building three full backends upfront. Exact text/vision model IDs are runtime configuration values and must reflect actual available models. Credentials come only from environment variables or an ignored local `.env`; no credentials enter source, logs, reports, or archives. A consumer subscription is not proof of API entitlement: confirm usable API access and quotas before relying on it. Do not enable billing automatically.
 
 ## 3. Stage 1: authorization and guarded identity resolution
@@ -242,6 +244,7 @@ Keep a small source layout:
 | `code/stage3.py` | State reconstruction, policy checks, relevant flow/restore analysis, one recheck |
 | `code/stage4.py` | Deterministic status rules, step templates, canonical sorting and validation |
 | `code/llm.py` | Gemini/configured provider calls, response validation, retry helper and usage accounting |
+| `code/quota.py` | Shared async request queue, rolling RPM/input-TPM reservations and bounded concurrency |
 | `code/evaluation/main.py` | Public/custom evaluation, uncertainty comparison and reports |
 | `code/tests/test_pipeline.py` | Focused policy, fallback, temporal, serialization and CLI regression tests |
 

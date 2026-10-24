@@ -106,6 +106,7 @@ def usage_summary(calls, cache_hits, count, mode, run_id):
     overall['estimated_usd'] = total_cost if all(i['estimated_usd'] is not None for i in per_model.values()) else None
     overall['estimated_usd_per_request'] = overall['estimated_usd'] / count if count and overall['estimated_usd'] is not None else None
     return {'run_id': run_id, 'mode': mode, 'requests': count, 'models': per_model, 'overall': overall,
+            'operation_counts': dict(Counter(call.get('operation', 'generate_content') for call in calls)),
             'response_cache_hits': cache_hits, 'notes': 'Actual calls attributable to this logical run; resumed checkpoints retain prior calls. Reused extraction from earlier runs is not billed again. Missing provider usage is not zero.'}
 
 
@@ -124,6 +125,9 @@ def write_usage_report(summary, root):
                   f"Total reported tokens: {overall['total_tokens']}; average per request: {overall['average_tokens_per_request']:.3f}.",
                   f"Estimated total USD: {overall['estimated_usd']}; per request: {overall['estimated_usd_per_request']}.", '',
                   f"Accepted response-cache hits: {summary['response_cache_hits']}; evidence extraction cache hits: {summary.get('evidence_cache_hits', 0)}.", '', summary['notes'], '',
+                  'SDK operation counts: ' + json.dumps(summary.get('operation_counts', {}), sort_keys=True) + '. '
+                  'Token-count requests count toward local RPM and concurrency; their returned counts reserve generation input TPM. '
+                  'They do not contribute generated-model input/output token totals. Failed requests retain conservative reservations.', '',
                   'Costs require explicitly configured verified per-million rates. A free tier may have zero money cost but nonzero quota/token usage. '
                   'Unknown token usage is excluded from numerical totals and disclosed above. Cached extraction construction cost from previous runs is not included in this run; '
                   'record those earlier runs separately when calculating total project expenditure. Offline runs do not verify live Gemini/vision accuracy.', ''])
@@ -187,6 +191,7 @@ def run(args):
     if output.resolve().is_relative_to(dataset):
         raise ValueError('output must not overwrite participant input data')
     console.progress('START', 0, len(requests), f"mode={mode} | provider={client.configuration()['provider']} | model={client.text_model or 'none'}")
+    console.progress('QUOTA', 0, len(requests), f'RPM={client.rpm} | input TPM={client.tpm} | concurrency={client.max_concurrency} | shared async SDK queue')
     signature = digest({'inputs': input_signature(dataset, request_name, client), 'uncertainty': args.uncertainty})
     checkpoint_path = runtime / f'checkpoint-{mode}.json'
     checkpoint = {'signature': signature, 'run_id': datetime.now(timezone.utc).isoformat(), 'results': {}, 'calls': []}
@@ -267,6 +272,7 @@ def run(args):
     logger.info('DONE | %.1fs | rows=%d | %s | estimated=%d | case warnings=%d | logged errors=%d | model calls=%d tokens=%d | output=%s | diagnostics=%s',
                 time.monotonic() - start, len(rows), dict(counts), estimated, total_warnings, console.error_count,
                 usage['overall']['calls'], usage['overall']['total_tokens'], output, runtime / f'diagnostics-{mode}.json')
+    client.close()
     return 0
 
 

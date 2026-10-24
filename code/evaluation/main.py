@@ -99,8 +99,9 @@ def main(argv=None):
                   'invalid intent responses cached before validation, unread PDF pages cached as successful extraction, '
                   'and retained-only/unknown-payload flows treated as prohibited copies. Integration regression checks also enforce the required archive-root report paths '
                   'and prevent system names in activity prose from becoming cross-subject resource links. Provider regression checks cover exponential backoff/jitter, '
-                  'permanent-error handling, retry-budget ownership, and server-directed cooldowns. The suite now includes 37 tests; '
-                  'live-provider quality and sample-specific accuracy tuning remain deferred until API configuration.', '',
+                  'permanent-error handling, retry-budget ownership, and server-directed cooldowns. Async scheduler tests cover rolling RPM/input TPM, '
+                  'shared concurrency, shutdown during backoff, all SDK operations, retry admission, real-SDK transport ownership and sanitized quota diagnostics. The suite now includes 50 tests; '
+                  'live-provider quality and accuracy refinement still require successful generation access.', '',
                   'Remaining measured failures:', '', '| Case | Expected status | Actual status | Sequence correct | Expected/actual steps |',
                   '| --- | --- | --- | --- | --- |'])
     for failure in metrics['failures']:

@@ -162,18 +162,22 @@ class EvidenceTests(unittest.TestCase):
 
 class ProviderTests(unittest.TestCase):
     def test_malformed_response_and_failure_usage_are_recorded(self):
-        import io
         import tempfile
+        from types import SimpleNamespace
         from unittest.mock import patch
         from llm import ModelClient
+        from sdk_fakes import FakeSDK
         with tempfile.TemporaryDirectory() as temp, patch.dict('os.environ', {'GEMINI_API_KEY': 'fixture-key', 'GEMINI_TEXT_MODEL': 'fixture-model'}):
             client = ModelClient(Path(temp))
-            with patch('urllib.request.urlopen', return_value=io.BytesIO(b'{"candidates":[]}')):
+            sdk = FakeSDK()
+            sdk.models.generate_content.return_value = SimpleNamespace(text=None, usage_metadata=None)
+            with patch('llm.genai.Client', return_value=sdk):
                 with self.assertLogs('audit', 'WARNING'):
                     self.assertIsNone(client.request_json('fixture', 'fixture text', {'type': 'ARRAY'}))
-            self.assertEqual(len(client.calls), 1)
-            self.assertFalse(client.calls[0]['success'])
-            self.assertIsNone(client.calls[0]['input_tokens'])
+            self.assertEqual(len(client.calls), 2)
+            self.assertFalse(client.calls[-1]['success'])
+            self.assertIsNone(client.calls[-1]['input_tokens'])
+            client.close()
 
     def test_invalid_model_intent_uses_fallback_and_not_final_status(self):
         from stage1 import interpret_requests
@@ -330,21 +334,23 @@ class ReviewRegressionTests(unittest.TestCase):
             self.assertEqual(observed_state(obs(category='ANALYTICS_PROFILE', facts=facts), context()), 'UNKNOWN')
 
     def test_invalid_intent_retry_makes_a_new_network_call(self):
-        import io
-        import json
         import tempfile
         from unittest.mock import patch
         from llm import ModelClient
         from stage1 import interpret_requests
+        from sdk_fakes import FakeSDK, response
         def envelope(phrase):
-            return io.BytesIO(json.dumps({'candidates': [{'content': {'parts': [{'text': json.dumps([{'case_id': 'demo', 'intent': 'DELETION', 'supporting_phrase': phrase}])}]}}]}).encode())
+            return response([{'case_id': 'demo', 'intent': 'DELETION', 'supporting_phrase': phrase}])
         with tempfile.TemporaryDirectory() as temp, patch.dict('os.environ', {'GEMINI_API_KEY': 'fixture-key', 'GEMINI_TEXT_MODEL': 'fixture-model'}):
             client = ModelClient(Path(temp))
-            with patch('urllib.request.urlopen', side_effect=[envelope('invented'), envelope('delete my account')]) as network:
+            sdk = FakeSDK()
+            sdk.models.generate_content.side_effect = [envelope('invented'), envelope('delete my account')]
+            with patch('llm.genai.Client', return_value=sdk):
                 with self.assertLogs('audit', 'WARNING'):
                     result = interpret_requests([{'case_id': 'demo', 'request_text': 'Please delete my account.'}], client)
-            self.assertEqual(network.call_count, 2)
+            self.assertEqual(sdk.models.generate_content.call_count, 2)
             self.assertEqual(result['demo']['method'], 'model')
+            client.close()
 
     def test_failed_pdf_vision_preserves_partial_data_and_is_not_cached(self):
         import tempfile

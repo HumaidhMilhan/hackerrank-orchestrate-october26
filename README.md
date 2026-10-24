@@ -11,13 +11,26 @@ python -m venv .venv
 .venv\Scripts\python -m pip install -r requirements.txt
 ```
 
-On macOS/Linux use `.venv/bin/python` instead. Activate the environment or substitute its Python path in the commands below. PyMuPDF is the only third-party dependency; CSV, SQLite, HTTP requests, CLI progress, tests, and packaging use the standard library.
+On macOS/Linux use `.venv/bin/python` instead. Activate the environment or substitute its Python path in the commands below. PyMuPDF extracts PDFs; Google's `google-genai` SDK handles Gemini calls. CSV, SQLite, quota scheduling, CLI progress, tests, and packaging use the standard library.
 
 ## Configure Gemini
 
-Copy `.env.example` to an uncommitted `.env`, then set `GEMINI_API_KEY`, `GEMINI_TEXT_MODEL`, and optionally `GEMINI_VISION_MODEL` to model IDs actually available in your Google AI Studio project. Alternatively set these as environment variables. An AI Pro subscription does not establish direct API entitlement; API keys, model access, billing, and quotas are separate account facts. The program does not enable billing.
+Copy `.env.example` to an uncommitted `.env`, then set `GEMINI_API_KEY`. The user-selected defaults are:
 
-No model ID or paid rate is guessed. Without a key and text model, the application runs its deterministic fallbacks and clearly warns that vision extraction is unavailable. You can force this with `--offline`. This makes the CLI runnable before API setup; it does not prove live multimodal accuracy. Groq/local backends are later alternatives if needed, rather than mandatory dependencies.
+```text
+GEMINI_MODEL=gemini-3.6-flash
+GEMINI_RPM=5
+GEMINI_TPM=250000
+GEMINI_MAX_CONCURRENCY=2
+```
+
+Both text and vision use `GEMINI_MODEL`. Optional `GEMINI_TEXT_MODEL` and `GEMINI_VISION_MODEL` override them individually. All settings can instead come from environment variables, which take precedence over `.env`. API access, billing, and granted quotas remain facts of the Google project; configuring a local limit does not grant quota. The program does not enable billing.
+
+Without a key, the application runs its deterministic fallbacks and clearly warns that vision extraction is unavailable. You can force this with `--offline`. This makes the CLI runnable before API setup; it does not prove live multimodal accuracy. Groq/local backends remain alternatives if scheduled Gemini access is unsuitable.
+
+Every Gemini SDK operation goes through a shared async queue in `code/quota.py`; audit stages never call the SDK directly. The scheduler enforces rolling 60-second RPM/input-TPM limits and at most two active operations. It counts images/text with the provider before generation, caches those counts, reserves schema/config overhead, and retains conservative reservations for failed attempts. Token-count calls also consume local RPM and concurrency; generation attempts consume input TPM. Accepted response-cache hits consume no API quota. SDK automatic retries and function calling are disabled; custom retries must rejoin the queue. This is one quota pool for one CLI process; other programs using the project can still consume its Google quota.
+
+The synchronous CLI uses the same queue through `ModelClient.request_json`; concurrent integrations can await `request_json_async` and finish with `aclose`. An explicit httpx transport with zero reconnect retries prevents the SDK's aiohttp reconnect path from bypassing the queue. Shutdown cancels and gathers pending requests, including backoff waits, before closing the worker loop. Existing audit decisions and output ordering remain deterministic.
 
 Optional `AUDIT_INPUT_USD_PER_MILLION`, `AUDIT_OUTPUT_USD_PER_MILLION`, and `AUDIT_CACHED_USD_PER_MILLION` must contain verified rates for the configured model. Leave them unset when unknown; reports distinguish unavailable cost from zero. Configure separate-model pricing in code before using differently priced text/vision models; one set of rates is otherwise applied to all models and is only an estimate.
 
@@ -50,7 +63,7 @@ The source resolves its normal dataset and output paths relative to the reposito
 ## Behavior and limitations
 
 - Intent interpretation uses batches of 20, one repair for affected invalid/missing interpretations, then explicit non-deletion/negation, multilingual deletion stems, and finally NON_DELETION with warning.
-- API transport failures use up to four retries after the initial request: exponential delays of 1, 2, 4, and 8 seconds plus up to 25% jitter, capped at 60 seconds. Retry only HTTP 408/429/5xx, timeouts, and connection/network failures. Permanent HTTP client errors are not retried. Exhausting transport retries does not trigger another interpretation retry.
+- SDK transport failures use up to four retries after the initial request: exponential delays of 1, 2, 4, and 8 seconds plus up to 25% jitter, capped at 60 seconds. Each attempt must reacquire shared quota. Retry only HTTP 408/429/5xx, timeouts, and connection/network failures. Permanent HTTP client errors are not retried. Exhausting transport retries does not trigger another interpretation retry.
 - Respect `Retry-After` and Google's `RetryInfo` delay. A provider-requested wait longer than 60 seconds defers further calls to that model for the indicated window while cases continue through fallbacks. Every physical attempt is counted separately; failures with missing token usage remain unknown.
 - Identity links follow explicit stable user ownership and eligible history, never names/phone coincidences or numeric suffixes.
 - Evidence is parsed once, with primary/replica scopes and capture/observation times. Resource retrieval has at most two link-expansion passes.
