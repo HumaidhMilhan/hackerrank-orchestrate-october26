@@ -215,7 +215,7 @@ def run(args):
     console.progress('START', 0, len(requests), f"mode={mode} | provider={client.configuration()['provider']} | model={client.text_model or 'none'}")
     if hasattr(client, 'role_config'):
         for role, config in client.role_config.items():
-            console.progress('MODEL', 0, len(requests), f"{role}={config['model']} | RPM={config['rpm']} | combined TPM={config['tpm']} | RPD={config['rpd']} | TPD={config['tpd']}")
+            console.progress('MODEL', 0, len(requests), f"{role}={config['model']} | RPM={config['rpm']} | combined TPM={config['tpm']} | RPD={config['rpd']} | TPD={config['tpd']} | output cap={config['max_output_tokens']} | reasoning={config['reasoning_effort']} | format={config['format']}")
         console.progress('QUOTA', 0, len(requests), f'provider concurrency={client.max_concurrency} | shared per-model async queues | review threshold={client.intent_confidence_threshold}')
     else:
         console.progress('QUOTA', 0, len(requests), f'RPM={client.rpm} | input TPM={client.tpm} | concurrency={client.max_concurrency} | shared async SDK queue')

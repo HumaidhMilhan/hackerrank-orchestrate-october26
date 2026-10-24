@@ -62,7 +62,9 @@ class GroqTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(strict['strict'])
         self.assertFalse(strict['schema']['additionalProperties'])
         self.assertFalse(strict['schema']['properties']['items']['items']['additionalProperties'])
-        self.assertEqual(self.payloads[2]['response_format'], {'type': 'json_object'})
+        self.assertTrue(self.payloads[2]['response_format']['json_schema']['strict'])
+        self.assertEqual(self.payloads[2]['reasoning_effort'], 'none')
+        self.assertEqual(self.payloads[2]['max_completion_tokens'], 512)
         self.assertTrue(self.payloads[2]['messages'][-1]['content'][-1]['image_url']['url'].startswith('data:image/png;base64,'))
         self.assertEqual(client.cache_hits, 1)
         self.assertEqual(len(client.calls), 3)
@@ -95,7 +97,7 @@ class GroqTests(unittest.IsolatedAsyncioTestCase):
             for _ in range(2):
                 self.assertIsNone(await client.request_json_async('intent', 'request', SCHEMA, validator=reject))
         self.assertEqual(len(self.payloads), 2)
-        self.assertTrue(client.retry_interpretation)
+        self.assertFalse(client.retry_interpretation)
         self.assertFalse(any(x['success'] for x in client.calls))
 
     async def test_shared_model_override_reuses_one_bucket(self):
@@ -178,6 +180,38 @@ class GroqTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(name=name), patch.dict(os.environ,{name:value}):
                 with self.assertRaises(ValueError): ModelClient(Path(self.temp.name),offline=True)
 
+    async def test_user_api_defaults_and_independent_model_buckets(self):
+        with patch.dict(os.environ, {'GROQ_INTENT_CONFIDENCE':'', 'GROQ_INTENT_BATCH_SIZE':''}), \
+             patch('groq_client.httpx.AsyncHTTPTransport',return_value=self.transport):
+            client=self.client()
+            self.assertEqual(client.intent_confidence_threshold,.80)
+            self.assertEqual(client.intent_batch_size,8)
+            await client.request_json_async('intent','one',SCHEMA)
+            await client.request_json_async('media','image',SCHEMA,image=b'image')
+            first=client.schedulers[client.text_model];vision=client.schedulers[client.vision_model]
+            self.assertIsNot(first.window,vision.window)
+            self.assertEqual(len(first.history),1)
+            self.assertEqual(len(vision.history),1)
+
+    async def test_local_value_error_does_not_replay_the_media_request(self):
+        from stage2 import interpret_media
+        with patch('groq_client.httpx.AsyncHTTPTransport',return_value=self.transport):
+            client=self.client()
+            result=await asyncio.to_thread(interpret_media,
+                {'file_id':'fixture','captured_at':'2026-01-01T00:00:00Z'},client,b'image','fixture')
+        self.assertIsNone(result)
+        self.assertEqual(len(self.payloads),1)
+
+    async def test_media_strict_schema_forbids_empty_resource_ids(self):
+        from stage2 import MEDIA_SCHEMA
+        with patch('groq_client.httpx.AsyncHTTPTransport',return_value=self.transport):
+            client=self.client()
+            await client.request_json_async('media','image',MEDIA_SCHEMA,image=b'image')
+        schema=self.payloads[0]['response_format']['json_schema']['schema']
+        resource=schema['properties']['items']['items']['properties']['resource_id']
+        self.assertEqual(resource['minLength'],1)
+        self.assertIn('pattern',resource)
+
     async def test_short_retry_after_is_shared_even_when_first_caller_exhausted(self):
         import time
         self.statuses = [429,200]; self.retry_after = '.15'
@@ -216,6 +250,19 @@ class GroqTests(unittest.IsolatedAsyncioTestCase):
             try:self.assertEqual(len(physical_calls),1,'physical slot must survive caller cancellation')
             finally:
                 release.set(); await asyncio.gather(second,return_exceptions=True)
+
+
+class LocalEvidenceRoutingTests(unittest.TestCase):
+    def test_structured_and_text_evidence_never_calls_vision(self):
+        from stage2 import EvidenceStore
+        from unittest.mock import Mock
+        client=Mock();client.request_json.side_effect=AssertionError('local evidence sent to vision')
+        store=EvidenceStore(Path('.'),client,Path('.runtime/fixture'))
+        meta={'file_id':'fixture','captured_at':'2026-01-01T00:00:00Z'}
+        for extension,data in [('json',b'{}'),('sql',b'CREATE TABLE fixture (resource_id TEXT);'),
+                               ('txt',b'ordinary handover'),('log',b'ordinary log')]:
+            with self.subTest(extension=extension):store._parse(meta,Path('fixture.'+extension),data)
+        client.request_json.assert_not_called()
 
 
 class DailyQuotaTests(unittest.IsolatedAsyncioTestCase):
