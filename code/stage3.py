@@ -77,17 +77,17 @@ def observed_state(obs, context):
                     return 'IDENTIFIABLE'
         if result == 'IDENTIFIABLE':
             return 'IDENTIFIABLE'
-        if result in {'REDACTED', 'ANONYMIZED'}:
-            return result
+        if category == 'ACCOUNT_TOMBSTONE' and not any(nonempty(fields.get(k)) for k in ['subject_reference', 'customer_reference', 'user_id', 'subject_ref']):
+            return 'UNKNOWN'
         if fields.get('direct_identifiers') is not None and normalize(fields['direct_identifiers']) == '0':
             return treatment
         if fields.get('pii_fields') is not None and normalize(fields['pii_fields']) == '0':
             return treatment
-        # Actual payload shapes explicitly expose the identifier fields, even when null.
-        payload_keys = {'email', 'phone', 'email_hash', 'requester_email', 'requester_name', 'message_text', 'message_excerpt', 'name'}
-        if payload_keys.intersection(fields):
-            if category == 'ACCOUNT_TOMBSTONE' and not any(nonempty(fields.get(k)) for k in ['subject_reference', 'customer_reference', 'user_id', 'subject_ref']):
-                return 'UNKNOWN'
+        # Missing fields in a partial read do not prove removal. Accept a complete
+        # snapshot payload, or an explicitly inspected set covering the identifiers.
+        contact_coverage = {'email', 'phone', 'email_hash'}.issubset(fields)
+        unlink_coverage = any(key in fields for key in ['user_id', 'subject_reference', 'customer_reference', 'subject_ref'])
+        if obs.get('payload_complete') or contact_coverage and (unlink_coverage if treatment == 'ANONYMIZED' else 'name' in fields):
             return treatment
         return 'UNKNOWN'
     # Structured row, observed existence or completed positive read.
@@ -105,6 +105,35 @@ def requirement(category, rules):
     if not rule:
         return None, None, None
     return rule['required_action'], EXPECTED.get(rule['required_action']), rule['rule_id']
+
+
+def flow_risk(obs, observations, rules, context):
+    """True: prohibited payload path, False: explicit permitted scope, None: unknown."""
+    facts, fields = obs['facts'], flatten(obs['facts'])
+    selector = normalize(fields.get('subject_selector'))
+    if selector and ('@' in selector or selector.startswith('user_')) and selector not in context['identifiers']:
+        return False
+    categories = facts.get('data_categories', facts.get('copied_categories', fields.get('payload_category')))
+    if isinstance(categories, str):
+        categories = [part.strip() for part in categories.split(',')]
+    if isinstance(categories, list) and categories:
+        actions = [rules.get(str(category), {}).get('required_action') for category in categories]
+        if all(action == 'RETAIN' for action in actions):
+            return False
+        if any(action in {'DELETE', 'REDACT', 'ANONYMIZE'} for action in actions):
+            return True
+        return None
+    endpoints = {str(fields[key]) for key in ['source_resource_id', 'target_resource_id', 'destination_resource_id'] if fields.get(key)}
+    related_categories = {row['category'] for row in observations if row['resource_id'] in endpoints
+                          and row.get('kind') != 'claim' and eligible(row, context['audit_at'])}
+    if any(rules.get(category, {}).get('required_action') in {'DELETE', 'REDACT', 'ANONYMIZE'} for category in related_categories):
+        return True
+    # A subject-selected customer connector feeding an analytics destination is
+    # observable copy capability; a bare enabled flag supplies no such scope.
+    description = normalize(str(fields.get('connector_name', '')) + ' ' + str(fields.get('destination', '')))
+    if selector in context['identifiers'] and re.search(r'customer|profile|personal', description) and re.search(r'analytics|warehouse|search|export', description):
+        return True
+    return None
 
 
 def assess_case(context, observations, rules, extraction_warnings=None):
@@ -133,6 +162,13 @@ def assess_case(context, observations, rules, extraction_warnings=None):
         states = {observed_state({**row, 'category': category}, context) for row in latest}
         action, expected, rule_id = requirement(category, rules)
         assessment = 'COMPLIANT' if expected and state == expected else ('UNCERTAIN' if state == 'UNKNOWN' or not expected else 'VIOLATION')
+        if category == 'DATA_FLOW' and state == 'ACTIVE':
+            risk = flow_risk(chosen, observations, rules, context)
+            if risk is False:
+                assessment, action, expected = 'PERMITTED', None, None
+            elif risk is None:
+                assessment = 'UNCERTAIN'
+                warnings.append(f'{resource}: active flow payload scope unresolved')
         if len(states - {'UNKNOWN'}) > 1:
             assessment = 'UNCERTAIN'
             warnings.append(f'{resource}: conflicting same-time observations in {scope}')

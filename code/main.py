@@ -141,6 +141,11 @@ def package_code(root):
         for source in sorted(set(candidates)):
             if source.is_file() and '__pycache__' not in source.parts:
                 archive.write(source, source.relative_to(root).as_posix())
+        # The competition names these paths relative to the archive root.
+        for name in ['evaluation_report.md', 'usage_report.md']:
+            report = root / 'code/evaluation' / name
+            if report.is_file():
+                archive.write(report, 'evaluation/' + name)
     return path
 
 

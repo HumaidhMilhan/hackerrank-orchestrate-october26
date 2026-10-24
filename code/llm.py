@@ -56,7 +56,9 @@ class ModelClient:
             try:
                 result = json.loads(cache.read_text(encoding='utf-8'))
                 if validator:
-                    validator(result)
+                    accepted = validator(result)
+                    if accepted is not None:
+                        result = accepted
                 self.cache_hits += 1
                 return result
             except (ValueError, TypeError, KeyError):
@@ -82,7 +84,9 @@ class ModelClient:
             text = ''.join(p.get('text', '') for p in body['candidates'][0]['content']['parts'] if not p.get('thought'))
             result = json.loads(text)
             if validator:
-                validator(result)
+                accepted = validator(result)
+                if accepted is not None:
+                    result = accepted
             usage['success'] = True
             atomic_json(cache, result)
             return result

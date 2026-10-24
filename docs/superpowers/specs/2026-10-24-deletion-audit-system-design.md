@@ -1,6 +1,6 @@
 # Ghost Data Still Exists: locked hackathon implementation design
 
-Date: 24 October 2026. Status: decisions locked by the user; solution implementation has not started.
+Date: 24 October 2026. Status: decisions locked by the user; CLI implementation complete, with offline verification. Live model/vision validation and accuracy refinement await API configuration.
 
 This document replaces the earlier production-oriented design with the lean decisions finalized stage by stage in the conversation. The target is a viable solution for a 24-hour hackathon. There are four core audit stages and a fifth runner/evaluation layer. The application is a terminal CLI showing progress, current status, warnings, and errors.
 
@@ -196,7 +196,7 @@ python code/main.py --verbose               # additional diagnostics
 python code/evaluation/main.py              # sample/custom evaluation and reports
 ```
 
-`--quiet` and `--verbose` are mutually exclusive. These commands describe the application to implement; the starter entry points are currently empty.
+`--quiet` and `--verbose` are mutually exclusive. These commands are implemented by the CLI entry points.
 
 Run shared extraction once, use the agreed retry limits, and checkpoint each finished case. Cache/checkpoint files and diagnostics live in an ignored root runtime directory outside `code/`. Reuse checkpoints only when inputs, policy/code configuration, and selected model/prompt settings are compatible. An interrupted run can resume without repeating accepted model extraction. Do not label a checkpoint or partial diagnostic file as the completed 518-row submission.
 

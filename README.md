@@ -84,4 +84,6 @@ python code/evaluation/main.py --package
 
 Alternatively append `--package` to the full audit command once both reports exist. The inspected `code.zip` includes README, requirements, the safe environment example, Python source/prompts, tests, and Markdown reports. It excludes the dataset, caches, environments, credentials, and nested archives. Upload root `output.csv` separately and root `log.txt` as the development transcript. The application does not submit or publish anything automatically.
 
+The archive also includes the required `evaluation/evaluation_report.md` and `evaluation/usage_report.md` paths at its root, copied from the generated reports under `code/evaluation/`.
+
 Challenge: https://wwww.hackerrank.com/contests/hackerrank-orchestrate-october26/challenges/ghost-data-still-exists

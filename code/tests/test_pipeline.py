@@ -36,6 +36,7 @@ class IntentTests(unittest.TestCase):
         result = IdentityIndex(users, history).resolve(case, 'DELETION')
         self.assertEqual(result['user_ids'], ['person-a'])
         self.assertIn('new@example.test', result['identifiers'])
+        self.assertNotIn('123', result['identifiers'])
 
     def test_future_identity_change_is_not_used(self):
         from stage1 import IdentityIndex
@@ -191,6 +192,23 @@ class ProviderTests(unittest.TestCase):
 
 
 class CliTests(unittest.TestCase):
+    def test_archive_has_required_report_paths_and_excludes_private_files(self):
+        import tempfile
+        import zipfile
+        from main import package_code
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / 'code/evaluation').mkdir(parents=True)
+            for name in ['evaluation_report.md', 'usage_report.md']:
+                (root / 'code/evaluation' / name).write_text('Fictional test report.', encoding='utf-8')
+            (root / '.env').write_text('PRIVATE=fixture', encoding='utf-8')
+            (root / 'dataset').mkdir(); (root / 'dataset/private.csv').write_text('fictional')
+            with zipfile.ZipFile(package_code(root)) as archive:
+                self.assertIn('evaluation/evaluation_report.md', archive.namelist())
+                self.assertIn('evaluation/usage_report.md', archive.namelist())
+                self.assertNotIn('.env', archive.namelist())
+                self.assertNotIn('dataset/private.csv', archive.namelist())
+
     def test_offline_progress_output_and_resume(self):
         import contextlib
         import csv
@@ -243,6 +261,119 @@ class CliTests(unittest.TestCase):
         from main import parse_args
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             parse_args(['--quiet', '--verbose'])
+
+
+class ReviewRegressionTests(unittest.TestCase):
+    def prepare_store(self, root, records, activities=None, extra_files=None):
+        import csv
+        import json
+        from llm import ModelClient
+        from stage2 import EvidenceStore
+        (root / 'evidence').mkdir(exist_ok=True)
+        (root / 'evidence/records.json').write_text(json.dumps({'records': records}), encoding='utf-8')
+        manifest = [{'file_id': 'record-source', 'file_path': 'evidence/records.json', 'captured_at': '2026-01-01T00:00:00Z'}] + (extra_files or [])
+        with (root / 'evidence_files.csv').open('w', newline='') as handle:
+            writer = csv.DictWriter(handle, fieldnames=['file_id', 'file_path', 'captured_at']); writer.writeheader(); writer.writerows(manifest)
+        with (root / 'system_activity.csv').open('w', newline='') as handle:
+            writer = csv.DictWriter(handle, fieldnames=['activity_id', 'event_time', 'event_type', 'source_system', 'target_system', 'resource_id', 'reported_result', 'details'])
+            writer.writeheader(); writer.writerows(activities or [])
+        return EvidenceStore(root, ModelClient(root / 'models', offline=True), root / 'extract').prepare()
+
+    def test_shared_phone_does_not_attribute_another_subject(self):
+        import tempfile
+        from evaluation.fixtures import context
+        with tempfile.TemporaryDirectory() as temp:
+            store = self.prepare_store(Path(temp), [{'resource_id': 'account_other', 'record_type': 'USER_PROFILE', 'system': 'account_service',
+                                                    'user_id': 'user_other', 'email': 'other@example.test', 'phone': '+123456789'}])
+            ctx = context(); ctx['user_ids'] = ['user_subject']; ctx['identifiers'].append('+123456789')
+            self.assertEqual(store.retrieve(ctx), [])
+
+    def test_structured_resource_link_is_followed(self):
+        import tempfile
+        from evaluation.fixtures import context
+        with tempfile.TemporaryDirectory() as temp:
+            store = self.prepare_store(Path(temp), [
+                {'resource_id': 'account_source', 'system': 'account_service', 'record_type': 'USER_PROFILE', 'email': 'subject@example.test', 'target_resource_id': 'export_linked'},
+                {'resource_id': 'export_linked', 'system': 'export_service', 'record_type': 'USER_EXPORT', 'object_key': 'fictional/export'}])
+            self.assertEqual({o['resource_id'] for o in store.retrieve(context())}, {'account_source', 'export_linked'})
+
+    def test_system_names_in_activity_prose_do_not_join_unrelated_resources(self):
+        import tempfile
+        from evaluation.fixtures import context
+        def activity(resource):
+            return {'activity_id': 'event-' + resource, 'event_time': '2026-01-01T00:00:00Z', 'event_type': 'DELETE_RECORD',
+                    'source_system': 'account_service', 'target_system': 'account_service', 'resource_id': resource,
+                    'reported_result': 'SUCCESS', 'details': 'Record read from account_service.'}
+        with tempfile.TemporaryDirectory() as temp:
+            store = self.prepare_store(Path(temp), [
+                {'resource_id': 'account_source', 'system': 'account_service', 'record_type': 'USER_PROFILE', 'email': 'subject@example.test'},
+                {'resource_id': 'account_other', 'system': 'account_service', 'record_type': 'USER_PROFILE', 'email': 'other@example.test'}],
+                [activity('account_source'), activity('account_other')])
+            self.assertEqual({o['resource_id'] for o in store.retrieve(context())}, {'account_source'})
+
+    def test_reverse_restore_link_is_discoverable_from_downstream(self):
+        import tempfile
+        from evaluation.fixtures import context
+        activity = {'activity_id': 'restore-event', 'event_time': '2026-01-01T00:00:00Z', 'event_type': 'RESTORE_BACKUP',
+                    'source_system': 'backup_service', 'target_system': 'search_service', 'resource_id': 'backup_demo',
+                    'reported_result': 'SUCCESS', 'details': 'Restore job repopulated downstream resource search_demo.'}
+        with tempfile.TemporaryDirectory() as temp:
+            store = self.prepare_store(Path(temp), [
+                {'resource_id': 'search_demo', 'system': 'search_service', 'record_type': 'SEARCH_INDEX_ENTRY', 'email': 'subject@example.test'},
+                {'resource_id': 'backup_demo', 'system': 'backup_service', 'record_type': 'BACKUP_ARCHIVE', 'restore_allowed': True}], [activity])
+            self.assertIn('backup_demo', {o['resource_id'] for o in store.retrieve(context())})
+
+    def test_partial_payload_or_treatment_label_is_not_verified_anonymization(self):
+        from evaluation.fixtures import context, obs
+        from stage3 import observed_state
+        for facts in [{'email': None}, {'result': 'ANONYMIZED'}, {'email': None, 'phone': None, 'email_hash': None}]:
+            self.assertEqual(observed_state(obs(category='ANALYTICS_PROFILE', facts=facts), context()), 'UNKNOWN')
+
+    def test_invalid_intent_retry_makes_a_new_network_call(self):
+        import io
+        import json
+        import tempfile
+        from unittest.mock import patch
+        from llm import ModelClient
+        from stage1 import interpret_requests
+        def envelope(phrase):
+            return io.BytesIO(json.dumps({'candidates': [{'content': {'parts': [{'text': json.dumps([{'case_id': 'demo', 'intent': 'DELETION', 'supporting_phrase': phrase}])}]}}]}).encode())
+        with tempfile.TemporaryDirectory() as temp, patch.dict('os.environ', {'GEMINI_API_KEY': 'fixture-key', 'GEMINI_TEXT_MODEL': 'fixture-model'}):
+            client = ModelClient(Path(temp))
+            with patch('urllib.request.urlopen', side_effect=[envelope('invented'), envelope('delete my account')]) as network:
+                with self.assertLogs('audit', 'WARNING'):
+                    result = interpret_requests([{'case_id': 'demo', 'request_text': 'Please delete my account.'}], client)
+            self.assertEqual(network.call_count, 2)
+            self.assertEqual(result['demo']['method'], 'model')
+
+    def test_failed_pdf_vision_preserves_partial_data_and_is_not_cached(self):
+        import tempfile
+        import fitz
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); (root / 'evidence').mkdir()
+            document = fitz.open()
+            page = document.new_page(); page.insert_text((50, 60), 'Account account_demo belongs to subject@example.test; profile detail.')
+            document.new_page()  # unreadable/empty second page requires vision
+            document.save(root / 'evidence/partial.pdf'); document.close()
+            store = self.prepare_store(root, [], extra_files=[{'file_id': 'pdf-source', 'file_path': 'evidence/partial.pdf', 'captured_at': '2026-01-01T00:00:00Z'}])
+            self.assertEqual([r['file_id'] for r in store.failures], ['pdf-source'])
+            self.assertTrue(any(o['resource_id'] == 'account_demo' for o in store.observations))
+            # Only the successful empty JSON extraction is cached, not the partial PDF.
+            self.assertEqual(len(list((root / 'extract').glob('*.json'))), 1)
+
+    def test_active_retained_only_flow_is_not_a_deletion_risk(self):
+        from evaluation.fixtures import context, obs, RULES
+        from stage3 import assess_case
+        observation = obs(resource='flow-demo', system='integration_service', category='DATA_FLOW',
+                          facts={'enabled': True, 'data_categories': ['LEGAL_HOLD_RECORD'], 'subject_selector': 'subject@example.test'})
+        assessment = assess_case(context(), [observation], {**RULES, 'LEGAL_HOLD_RECORD': {'rule_id': 'hold', 'required_action': 'RETAIN'}})
+        self.assertFalse(any(r['assessment'] == 'VIOLATION' and r['action'] == 'DISABLE' for r in assessment['resources']))
+
+    def test_active_flow_with_unknown_payload_stays_uncertain(self):
+        from evaluation.fixtures import context, obs, RULES
+        from stage3 import assess_case
+        assessment = assess_case(context(), [obs(resource='flow-demo', system='integration_service', category='DATA_FLOW', facts={'enabled': True})], RULES)
+        self.assertEqual(assessment['resources'][0]['assessment'], 'UNCERTAIN')
 
 
 if __name__ == '__main__':

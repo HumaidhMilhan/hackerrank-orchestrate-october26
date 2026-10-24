@@ -6,16 +6,16 @@ Requests: 32. These are public sample measurements, not hidden 518-case accuracy
 
 | Metric | Result |
 | --- | ---: |
-| status accuracy | 90.62% |
-| exact row accuracy | 15.62% |
-| step precision | 94.41% |
-| step recall | 78.76% |
-| step f1 | 85.88% |
-| field accuracy | 66.50% |
-| sequence accuracy | 15.62% |
+| status accuracy | 87.50% |
+| exact row accuracy | 12.50% |
+| step precision | 92.62% |
+| step recall | 71.50% |
+| step f1 | 80.70% |
+| field accuracy | 52.21% |
+| sequence accuracy | 12.50% |
 
-Exact step matches: 152 / 161 predicted and 193 expected.
-Aligned field matches: 917 / 1379.
+Exact step matches: 138 / 149 predicted and 193 expected.
+Aligned field matches: 720 / 1379.
 
 Step comparison excludes step_no but retains all other fields including evidence IDs. Field comparison uses aligned array positions; missing steps count as seven mismatches. Sequence comparison includes every field and array order. JSON key order and whitespace are ignored.
 
@@ -67,14 +67,16 @@ Both policies reuse saved assessments without new model calls.
 
 | Policy | Status accuracy | Exact row | Sequence |
 | --- | ---: | ---: | ---: |
-| best-evidence | 90.62% | 15.62% | 15.62% |
-| incomplete | 68.75% | 15.62% | 15.62% |
+| best-evidence | 87.50% | 12.50% | 12.50% |
+| incomplete | 68.75% | 12.50% | 12.50% |
 
 The configured default remains best-evidence. This comparison does not automatically select per-case answers or change policy. Review false COMPLETE cases before applying a general conservative rule; parser/identity/policy errors must be fixed at their source.
 
 ## Failures found and improvements made
 
 Implementation separates primary and replica scopes, checks capture and observation cutoffs, distinguishes operation claims from direct reads, uses scoped multilingual negation before deletion stems, preserves tombstone references, and applies canonical operation ordering. These mechanisms are covered by independent tests rather than hardcoded sample labels.
+
+The implementation review found six defects, reproduced with fictional regression cases and fixed: shared-phone attribution, structured/reverse resource links, partial payloads or treatment labels accepted as compliance proof, invalid intent responses cached before validation, unread PDF pages cached as successful extraction, and retained-only/unknown-payload flows treated as prohibited copies. Integration regression checks also enforce the required archive-root report paths and prevent system names in activity prose from becoming cross-subject resource links. The suite now includes 30 tests; live-provider quality and sample-specific accuracy tuning remain deferred until API configuration.
 
 Remaining measured failures:
 
@@ -85,16 +87,17 @@ Remaining measured failures:
 | case_03 | COMPLETE | COMPLETE | False | 3/2 |
 | case_04 | COMPLETE | INCOMPLETE | False | 2/0 |
 | case_05 | INCOMPLETE | INCOMPLETE | False | 3/4 |
-| case_06 | INCOMPLETE | INCOMPLETE | False | 4/3 |
 | case_07 | INCOMPLETE | INCOMPLETE | False | 4/3 |
 | case_08 | INCOMPLETE | INCOMPLETE | False | 4/3 |
 | case_09 | INCOMPLETE | INCOMPLETE | False | 5/3 |
 | case_10 | INCOMPLETE | INCOMPLETE | False | 4/1 |
+| case_11 | INCOMPLETE | INCOMPLETE | False | 14/12 |
 | case_12 | INCOMPLETE | INCOMPLETE | False | 5/5 |
+| case_15 | INCOMPLETE | COMPLETE | False | 5/2 |
 | case_16 | INCOMPLETE | INCOMPLETE | False | 7/8 |
 | case_17 | INCOMPLETE | INCOMPLETE | False | 5/7 |
-| case_18 | INCOMPLETE | INCOMPLETE | False | 14/12 |
-| case_20 | INCOMPLETE | INCOMPLETE | False | 8/6 |
+| case_18 | INCOMPLETE | INCOMPLETE | False | 14/10 |
+| case_20 | INCOMPLETE | INCOMPLETE | False | 8/4 |
 | case_21 | COMPLETE | COMPLETE | False | 3/1 |
 | case_22 | INCOMPLETE | INCOMPLETE | False | 8/7 |
 | case_23 | INCOMPLETE | INCOMPLETE | False | 8/6 |
@@ -103,8 +106,8 @@ Remaining measured failures:
 | case_26 | COMPLETE | COMPLETE | False | 6/4 |
 | case_27 | COMPLETE | COMPLETE | False | 6/4 |
 | case_28 | COMPLETE | COMPLETE | False | 6/4 |
-| case_29 | INCOMPLETE | INCOMPLETE | False | 14/12 |
-| case_30 | INCOMPLETE | INCOMPLETE | False | 14/12 |
+| case_29 | INCOMPLETE | INCOMPLETE | False | 14/10 |
+| case_30 | INCOMPLETE | INCOMPLETE | False | 14/10 |
 | case_31 | COMPLETE | COMPLETE | False | 3/2 |
 | case_32 | INCOMPLETE | INCOMPLETE | False | 5/4 |
 

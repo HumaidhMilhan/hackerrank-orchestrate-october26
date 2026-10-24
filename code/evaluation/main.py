@@ -94,6 +94,12 @@ def main(argv=None):
                   'Implementation separates primary and replica scopes, checks capture and observation cutoffs, distinguishes operation claims from direct reads, '
                   'uses scoped multilingual negation before deletion stems, preserves tombstone references, and applies canonical operation ordering. '
                   'These mechanisms are covered by independent tests rather than hardcoded sample labels.', '',
+                  'The implementation review found six defects, reproduced with fictional regression cases and fixed: shared-phone attribution, '
+                  'structured/reverse resource links, partial payloads or treatment labels accepted as compliance proof, '
+                  'invalid intent responses cached before validation, unread PDF pages cached as successful extraction, '
+                  'and retained-only/unknown-payload flows treated as prohibited copies. Integration regression checks also enforce the required archive-root report paths '
+                  'and prevent system names in activity prose from becoming cross-subject resource links. The suite now includes 30 tests; '
+                  'live-provider quality and sample-specific accuracy tuning remain deferred until API configuration.', '',
                   'Remaining measured failures:', '', '| Case | Expected status | Actual status | Sequence correct | Expected/actual steps |',
                   '| --- | --- | --- | --- | --- |'])
     for failure in metrics['failures']:

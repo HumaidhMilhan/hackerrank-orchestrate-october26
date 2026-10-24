@@ -72,10 +72,13 @@ def scope_for(name):
 
 
 def observation(meta, resource, system, category, facts, location, observed_at=None, scope='primary', kind='observation'):
+    fields = flatten(facts)
+    links = sorted({str(fields[key]) for key in ['source_resource_id', 'target_resource_id', 'destination_resource_id']
+                    if fields.get(key) and str(fields[key]) != resource})
     return {'evidence_id': meta['file_id'], 'resource_id': resource, 'system_id': system,
             'category': category, 'facts': facts, 'location': location,
             'observed_at': observed_at or meta['captured_at'], 'captured_at': meta['captured_at'],
-            'scope': scope, 'kind': kind, 'identifiers': sorted(identifiers(facts))}
+            'scope': scope, 'kind': kind, 'identifiers': sorted(identifiers(facts)), 'linked_resources': links}
 
 
 def parse_json(meta, obj):
@@ -95,7 +98,10 @@ def parse_json(meta, obj):
         if resource:
             origin, category = category_for(collection, system, value, resource)
             # Preserve the complete row, including nested profile/document fields.
-            output.append(observation(meta, resource, origin, category, value, path, observed))
+            row = observation(meta, resource, origin, category, value, path, observed)
+            # A snapshot record is a complete payload; query results and event summaries are not.
+            row['payload_complete'] = not any(key in value for key in ['event', 'event_type', 'result', 'rows', 'total_hits'])
+            output.append(row)
             return
         for key, child in value.items():
             if key == 'service_exports' and isinstance(child, dict):
@@ -137,8 +143,10 @@ def parse_sql(meta, text):
                 if facts.get('record_json'):
                     facts = json.loads(facts['record_json'])
                 system, category = category_for(collection, dict(row).get('origin_system', ''), facts, resource)
-                output.append(observation(meta, resource, system, category, facts,
-                                          f'{table}[resource_id={resource}]', scope=scope_for(table)))
+                row = observation(meta, resource, system, category, facts,
+                                  f'{table}[resource_id={resource}]', scope=scope_for(table))
+                row['payload_complete'] = True
+                output.append(row)
     finally:
         connection.close()
     return output
@@ -257,7 +265,7 @@ def interpret_media(meta, client, image, location):
 
 def parse_pdf(meta, path, client):
     import fitz
-    output = []
+    output, complete = [], True
     with fitz.open(path) as document:
         pages = [page.get_text(sort=True) for page in document]
         text = '\n'.join(pages)
@@ -276,7 +284,14 @@ def parse_pdf(meta, path, client):
                 media = interpret_media(meta, client, page.get_pixmap().tobytes('png'), f'PDF page {index + 1}')
                 if media is not None:
                     output.extend(media)
-    return output, '\n'.join(pages)
+                else:
+                    complete = False
+    return output, '\n'.join(pages), complete
+
+
+class PartialExtraction(Exception):
+    def __init__(self, observations):
+        self.observations = observations
 
 
 class EvidenceStore:
@@ -321,6 +336,10 @@ class EvidenceStore:
                     logger.warning('%s: visual extraction unavailable; retaining uncertainty and continuing', meta['file_id'])
                 else:
                     self.observations.extend(parsed)
+            except PartialExtraction as exc:
+                self.observations.extend(exc.observations)
+                self.failures.append(meta)
+                logger.warning('%s: some PDF pages unread; preserving partial observations without caching success', meta['file_id'])
             except Exception as exc:
                 self.failures.append(meta)
                 logger.warning('%s: extraction failed (%s); continuing with warning', meta['file_id'], type(exc).__name__)
@@ -335,8 +354,14 @@ class EvidenceStore:
                               event['event_time'], kind='claim')
             obs['linked_resources'] = sorted(set(RESOURCE_RE.findall(details)) - {resource})
             self.activities.append(obs)
+        # Prefix-like system names in prose (e.g. account_service) are not
+        # resource references. Ground narrative links in actual resource IDs.
+        known_resources = {obs['resource_id'] for obs in self.observations + self.activities}
+        for obs in self.activities:
+            obs['linked_resources'] = sorted(set(obs['linked_resources']) & known_resources)
         for obs in self.observations + self.activities:
-            self.by_resource[obs['resource_id']].append(obs)
+            for resource in {obs['resource_id'], *obs.get('linked_resources', [])}:
+                self.by_resource[resource].append(obs)
             for identifier in obs['identifiers']:
                 self.by_identifier[identifier].append(obs)
         return self
@@ -346,10 +371,12 @@ class EvidenceStore:
         if suffix == '.png':
             return interpret_media(meta, self.client, raw, 'screenshot')
         if suffix == '.pdf':
-            result, text = parse_pdf(meta, path, self.client)
+            result, text, complete = parse_pdf(meta, path, self.client)
             # A readable document with no explicit resource IDs is searchable context,
             # not a fabricated record. Keep it for targeted model interpretation.
             self.artifacts[meta['file_id']]['text_available'] = bool(text.strip())
+            if not complete:
+                raise PartialExtraction(result)
             return result
         text = raw.decode('utf-8-sig')
         if suffix == '.json':
@@ -364,10 +391,16 @@ class EvidenceStore:
 
     def retrieve(self, context):
         cutoff = context['audit_at']
+        known_subjects = {normalize(uid) for uid in context.get('user_ids', [])}
+        def attributable(obs):
+            owners = {normalize(value) for key, value in flatten(obs['facts']).items()
+                      if key in {'user_id', 'customer_reference', 'subject_reference', 'subject_ref'}
+                      and value and USER_RE.fullmatch(str(value))}
+            return not known_subjects or not owners or bool(owners.intersection(known_subjects))
         selected, resources = {}, set()
         for identifier in context['identifiers']:
             for obs in self.by_identifier.get(normalize(identifier), []):
-                if eligible(obs, cutoff):
+                if eligible(obs, cutoff) and attributable(obs):
                     selected[(obs['evidence_id'], obs['location'], obs['resource_id'])] = obs
                     resources.add(obs['resource_id'])
         # An eligible source row can supply explicit ownership when a current
@@ -384,11 +417,11 @@ class EvidenceStore:
                 value = fields.get(key)
                 if value and USER_RE.fullmatch(str(value)):
                     owned_subjects.add(normalize(value))
-        known_subjects = set(context.get('user_ids', []))
         if len(owned_subjects) == 1 and (not known_subjects or owned_subjects.issubset(known_subjects)):
+            known_subjects.update(owned_subjects)
             for uid in owned_subjects:
                 for obs in self.by_identifier.get(uid, []):
-                    if eligible(obs, cutoff):
+                    if eligible(obs, cutoff) and attributable(obs):
                         selected[(obs['evidence_id'], obs['location'], obs['resource_id'])] = obs
                         resources.add(obs['resource_id'])
         # Initial resource history search, followed by no more than two link expansions.
@@ -396,8 +429,9 @@ class EvidenceStore:
             discovered = set()
             for resource in sorted(resources):
                 for obs in self.by_resource.get(resource, []):
-                    if eligible(obs, cutoff):
-                        selected[(obs['evidence_id'], obs['location'], resource)] = obs
+                    if eligible(obs, cutoff) and attributable(obs):
+                        selected[(obs['evidence_id'], obs['location'], obs['resource_id'])] = obs
+                        discovered.add(obs['resource_id'])
                         discovered.update(obs.get('linked_resources', []))
             new = discovered - resources
             if not new:
