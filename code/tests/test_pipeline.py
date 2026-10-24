@@ -354,10 +354,10 @@ class ReviewRegressionTests(unittest.TestCase):
 
     def test_failed_pdf_vision_preserves_partial_data_and_is_not_cached(self):
         import tempfile
-        import fitz
+        import pymupdf
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp); (root / 'evidence').mkdir()
-            document = fitz.open()
+            document = pymupdf.open()
             page = document.new_page(); page.insert_text((50, 60), 'Account account_demo belongs to subject@example.test; profile detail.')
             document.new_page()  # unreadable/empty second page requires vision
             document.save(root / 'evidence/partial.pdf'); document.close()

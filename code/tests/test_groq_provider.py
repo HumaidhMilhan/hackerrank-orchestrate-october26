@@ -121,6 +121,15 @@ class GroqTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(client.schedulers[client.text_model].history), 2)
         self.assertEqual([c['attempt'] for c in client.calls], [1,2])
 
+    async def test_non_allowlisted_http_errors_do_not_transport_retry(self):
+        for status in [400,401,403,408,409,501]:
+            with self.subTest(status=status),patch('groq_client.httpx.AsyncHTTPTransport',return_value=self.transport):
+                self.statuses=[status];before=len(self.payloads)
+                client=self.client()
+                self.assertIsNone(await client.request_json_async('intent','status '+str(status),SCHEMA))
+                self.assertEqual(len(self.payloads)-before,1)
+                await client.aclose()
+
     async def test_shutdown_cancels_groq_backoff_work(self):
         import threading
         started = threading.Event(); original_sleep = asyncio.sleep
@@ -200,17 +209,15 @@ class GroqTests(unittest.IsolatedAsyncioTestCase):
             result=await asyncio.to_thread(interpret_media,
                 {'file_id':'fixture','captured_at':'2026-01-01T00:00:00Z'},client,b'image','fixture')
         self.assertIsNone(result)
-        self.assertEqual(len(self.payloads),1)
+        self.assertEqual(sum(any(c.get('type')=='image_url' for c in p['messages'][1]['content']) for p in self.payloads),1)
+        self.assertEqual(self.payloads[-1]['model'],client.text_model)
 
-    async def test_media_strict_schema_forbids_empty_resource_ids(self):
+    async def test_media_uses_native_json_even_when_strict_env_is_requested(self):
         from stage2 import MEDIA_SCHEMA
         with patch.dict(os.environ,{'GROQ_EVIDENCE_FORMAT':'strict'}),patch('groq_client.httpx.AsyncHTTPTransport',return_value=self.transport):
             client=self.client()
             await client.request_json_async('media','image',MEDIA_SCHEMA,image=b'image')
-        schema=self.payloads[0]['response_format']['json_schema']['schema']
-        resource=schema['properties']['items']['items']['properties']['resource_id']
-        self.assertEqual(resource['minLength'],1)
-        self.assertIn('pattern',resource)
+        self.assertEqual(self.payloads[0]['response_format'],{'type':'json_object'})
 
     async def test_short_retry_after_is_shared_even_when_first_caller_exhausted(self):
         import time
@@ -256,13 +263,15 @@ class LocalEvidenceRoutingTests(unittest.TestCase):
     def test_structured_and_text_evidence_never_calls_vision(self):
         from stage2 import EvidenceStore
         from unittest.mock import Mock
-        client=Mock();client.request_json.side_effect=AssertionError('local evidence sent to vision')
+        client=Mock();client.request_json.return_value=[]
         store=EvidenceStore(Path('.'),client,Path('.runtime/fixture'))
         meta={'file_id':'fixture','captured_at':'2026-01-01T00:00:00Z'}
         for extension,data in [('json',b'{}'),('sql',b'CREATE TABLE fixture (resource_id TEXT);'),
                                ('txt',b'ordinary handover'),('log',b'ordinary log')]:
             with self.subTest(extension=extension):store._parse(meta,Path('fixture.'+extension),data)
-        client.request_json.assert_not_called()
+        self.assertEqual(client.request_json.call_count,1)
+        self.assertEqual(client.request_json.call_args.args[0],'text_observation')
+        self.assertNotIn('image',client.request_json.call_args.kwargs)
 
 
 class DailyQuotaTests(unittest.IsolatedAsyncioTestCase):

@@ -246,7 +246,35 @@ SEARCH_INDEX_ENTRY, USER_EXPORT, SECURITY_AUDIT_LOG, LEGAL_HOLD_RECORD, BACKUP_A
 MARKETING_PROFILE, EMAIL_DELIVERY_LOG, PRODUCT_TELEMETRY, CACHE_ENTRY, SECONDARY_IDENTIFIER when grounded.'''
 
 
-def interpret_media(meta, client, image, location):
+def interpret_text(meta,client,text):
+    def validate(items):
+        if not isinstance(items,list):raise ValueError('expected record list')
+        for item in items:
+            facts=json.loads(item['facts_json'])
+            if not isinstance(facts,dict) or not item['resource_id'] or item['resource_id'] not in text:
+                raise ValueError('unsupported resource')
+            if not item['supporting_text'] or item['supporting_text'] not in text:raise ValueError('unsupported quote')
+            for value in flatten(facts).values():
+                if str(value).lower() not in text.lower():raise ValueError('unsupported fact')
+    if not client.enabled:return None
+    items=client.request_json('text_observation','Extract business record rows only from this text. '
+        'Copy exact resource IDs, facts, and supporting_text quotes. Never infer absence or verdicts. SOURCE: '+text,
+        MEDIA_SCHEMA,validator=validate)
+    if items is None:return None
+    return media_rows(meta,items,'text')
+
+
+def media_rows(meta,items,location):
+    rows=[]
+    for item in items:
+        facts=json.loads(item['facts_json'])
+        system,category=category_for('',item['system_id'],facts,item['resource_id'])
+        rows.append(observation(meta,item['resource_id'],system,item['record_type'] or category,facts,
+                                location+'; '+item['supporting_text']))
+    return rows
+
+
+def interpret_media(meta, client, image, location, mime='image/png'):
     def validate(items):
         if not isinstance(items, list):
             raise ValueError('expected record list')
@@ -256,19 +284,22 @@ def interpret_media(meta, client, image, location):
             if not isinstance(json.loads(item['facts_json']), dict) or not item.get('supporting_text'):
                 raise ValueError('facts/location missing')
     for _ in range(2 if client.enabled else 0):
-        items = client.request_json('media', MEDIA_PROMPT, MEDIA_SCHEMA, image=image, validator=validate)
+        kwargs={'image':image,'validator':validate,'mime':mime}
+        if hasattr(client,'daily_usage'):kwargs.update(evidence_id=meta['file_id'],source_origin=meta.get('source_system',meta.get('source_origin','')))
+        items = client.request_json('media', MEDIA_PROMPT, MEDIA_SCHEMA, **kwargs)
         if items is None and not getattr(client, 'retry_interpretation', True):
             break
         if items is not None:
-            return [observation(meta, item['resource_id'], item['system_id'], item['record_type'],
-                                json.loads(item['facts_json']), location + '; ' + item['supporting_text']) for item in items]
+            rows=media_rows(meta,items,location)
+            if getattr(client,'last_outcome',{}).get('incomplete'):raise PartialExtraction(rows)
+            return rows
     return None
 
 
 def parse_pdf(meta, path, client):
-    import fitz
+    import pymupdf
     output, complete = [], True
-    with fitz.open(path) as document:
+    with pymupdf.open(path) as document:
         pages = [page.get_text(sort=True) for page in document]
         text = '\n'.join(pages)
         for index, page in enumerate(document):
@@ -283,7 +314,9 @@ def parse_pdf(meta, path, client):
                     facts['retention_note'] = retain.group(1)
                 output.append(observation(meta, resource, system, category, facts, f'PDF page {index + 1}'))
             if len(page_text.strip()) < 30:
-                media = interpret_media(meta, client, page.get_pixmap().tobytes('png'), f'PDF page {index + 1}')
+                try:media = interpret_media(meta, client, page.get_pixmap().tobytes('png'), f'PDF page {index + 1}')
+                except PartialExtraction as exc:
+                    output.extend(exc.observations);media=None
                 if media is not None:
                     output.extend(media)
                 else:
@@ -341,7 +374,7 @@ class EvidenceStore:
             except PartialExtraction as exc:
                 self.observations.extend(exc.observations)
                 self.failures.append(meta)
-                logger.warning('%s: some PDF pages unread; preserving partial observations without caching success', meta['file_id'])
+                logger.warning('%s: partial extraction; preserving observations without caching success', meta['file_id'])
             except Exception as exc:
                 self.failures.append(meta)
                 logger.warning('%s: extraction failed (%s); continuing with warning', meta['file_id'], type(exc).__name__)
@@ -370,8 +403,9 @@ class EvidenceStore:
 
     def _parse(self, meta, path, raw):
         suffix = path.suffix.lower()
-        if suffix == '.png':
-            return interpret_media(meta, self.client, raw, 'screenshot')
+        if suffix in {'.png','.jpg','.jpeg','.webp'}:
+            mime={'.png':'image/png','.jpg':'image/jpeg','.jpeg':'image/jpeg','.webp':'image/webp'}[suffix]
+            return interpret_media(meta, self.client, raw, 'screenshot',mime)
         if suffix == '.pdf':
             result, text, complete = parse_pdf(meta, path, self.client)
             # A readable document with no explicit resource IDs is searchable context,
@@ -388,7 +422,12 @@ class EvidenceStore:
         if suffix == '.log':
             return parse_logs(meta, text)
         if suffix == '.txt':
-            return parse_handover(meta, text)
+            rows=parse_handover(meta, text)
+            return rows if rows else interpret_text(meta,self.client,text)
+        if suffix == '.csv':
+            import csv,io
+            rows=list(csv.DictReader(io.StringIO(text)))
+            return parse_json(meta,rows)
         raise ValueError('unsupported evidence format')
 
     def retrieve(self, context):

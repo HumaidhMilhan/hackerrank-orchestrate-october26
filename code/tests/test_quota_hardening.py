@@ -101,7 +101,7 @@ class ConfigurationTests(unittest.TestCase):
             client=ModelClient(Path(temp),offline=True)
             try:
                 self.assertEqual(client.intent_batch_size,4)
-                self.assertEqual(client.role_config['INTENT']['max_output_tokens'],256)
+                self.assertEqual(client.role_config['INTENT']['max_output_tokens'],512)
                 self.assertEqual(client.role_config['REVIEW']['max_output_tokens'],512)
                 self.assertEqual(client.role_config['EVIDENCE']['format'],'json')
                 self.assertEqual(client.max_retries,1)

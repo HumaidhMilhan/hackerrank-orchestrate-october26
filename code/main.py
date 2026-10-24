@@ -76,7 +76,7 @@ def input_signature(dataset, requests_file, client):
     return digest({'files': files, 'source': source, 'model': client.configuration(), 'version': VERSION})
 
 
-def usage_summary(calls, cache_hits, count, mode, run_id):
+def usage_summary(calls, cache_hits, count, mode, run_id, events=()):
     import os
     per_model = {}
     for call in calls:
@@ -88,6 +88,22 @@ def usage_summary(calls, cache_hits, count, mode, run_id):
             item[field] += call.get(field) or 0
         if call.get('input_tokens') is None or call.get('output_tokens') is None:
             item['unknown_usage_calls'] += 1
+    counters=['attempted_calls','successful_calls','truncated_calls','http_failures','validation_failures','local_quota_skips','transport_retries','actual_tokens']
+    for item in per_model.values():
+        item.update(dict.fromkeys(counters,0))
+    for call in calls:
+        item=per_model[call['provider']+'/'+call['model']]
+        item['attempted_calls']+=1
+        item['successful_calls']+=int(bool(call.get('success')))
+        item['truncated_calls']+=int(call.get('finish_reason')=='length')
+        item['http_failures']+=int(bool(call.get('http_status')))
+        item['validation_failures']+=int(bool(call.get('validation_error')) and call.get('finish_reason')!='length')
+        item['transport_retries']+=int(call.get('attempt',1)>1)
+        item['actual_tokens']+=(call.get('input_tokens') or 0)+(call.get('output_tokens') or 0)+(call.get('thinking_tokens') or 0)
+    for event in events:
+        key='groq/'+event['model']
+        item=per_model.setdefault(key,dict.fromkeys(['calls','input_tokens','output_tokens','cached_tokens','thinking_tokens','unknown_usage_calls']+counters,0))
+        item['local_quota_skips']+=int(event.get('kind')=='local_quota_skip')
     def rates_for(key):
         provider, model = key.split('/', 1)
         prefixes = ['AUDIT']
@@ -120,6 +136,7 @@ def usage_summary(calls, cache_hits, count, mode, run_id):
             item['estimated_usd'] = None
     overall = {key: sum(item[key] for item in per_model.values()) for key in
                ['calls', 'input_tokens', 'output_tokens', 'cached_tokens', 'thinking_tokens', 'unknown_usage_calls']}
+    overall.update({key:sum(item[key] for item in per_model.values()) for key in counters})
     overall['total_tokens'] = overall['input_tokens'] + overall['output_tokens'] + overall['thinking_tokens']
     overall['average_tokens_per_request'] = overall['total_tokens'] / count if count else 0
     overall['estimated_usd'] = total_cost if all(i['estimated_usd'] is not None for i in per_model.values()) else None
@@ -216,6 +233,10 @@ def run(args):
     if hasattr(client, 'role_config'):
         for role, config in client.role_config.items():
             console.progress('MODEL', 0, len(requests), f"{role}={config['model']} | RPM={config['rpm']} | combined TPM={config['tpm']} | RPD={config['rpd']} | TPD={config['tpd']} | output cap={config['max_output_tokens']} | reasoning={config['reasoning_effort']} | format={config['format']}")
+        if hasattr(client,'daily_usage'):
+            for role,config in client.role_config.items():
+                state=client.daily_usage.snapshot(config['model'])
+                logger.info('QUOTA STATE | model=%s | RPD=%s/%s | TPD=%s/%s | reserved=%s | date=%s UTC',config['model'],state['requests_today'],config['rpd'],state['tokens_today'],config['tpd'],state['inflight_reserved_tokens'],state['date'])
         console.progress('QUOTA', 0, len(requests), f'provider concurrency={client.max_concurrency} | separate model queues | review threshold={client.intent_confidence_threshold} | transient retry budget={client.max_retries}')
     else:
         console.progress('QUOTA', 0, len(requests), f'RPM={client.rpm} | input TPM={client.tpm} | concurrency={client.max_concurrency} | shared async SDK queue')
@@ -240,6 +261,7 @@ def run(args):
     registry.update({r['audit_id']: r['event_time'] for r in read_csv(dataset / 'user_audit_log.csv')})
     counts = Counter(value['row']['deletion_status'] for value in checkpoint['results'].values())
     prior_calls = list(checkpoint.get('calls', []))
+    prior_events=list(checkpoint.get('local_events',[]))
     for index, case in enumerate(sorted(pending, key=lambda r: r['case_id']), 1):
         cid = case['case_id']
         context = None
@@ -269,9 +291,11 @@ def run(args):
                           'resources': [], 'warnings': ['case processing exception: ' + type(exc).__name__], 'uncertain': True}
             row, diagnostic = build_output(assessment, args.uncertainty)
             diagnostic['exception_fallback'] = True
+        assessment['intent_resolution']={key:intents[cid].get(key) for key in ['method','resolution_reason','recovery_reasons']}
         counts[row['deletion_status']] += 1
         checkpoint['results'][cid] = {'row': row, 'assessment': assessment, 'diagnostic': diagnostic}
         checkpoint['calls'] = prior_calls + client.calls
+        checkpoint['local_events']=prior_events+getattr(client,'events',[])
         atomic_json(checkpoint_path, checkpoint)
         console.progress('CASE', len(checkpoint['results']), len(requests),
                          f"{cid} | {row['deletion_status']} | warnings={len(diagnostic['warnings'])} | COMPLETE={counts['COMPLETE']} INCOMPLETE={counts['INCOMPLETE']} NOT_APPLICABLE={counts['NOT_APPLICABLE']}")
@@ -282,8 +306,11 @@ def run(args):
     write_output(output, rows, requests, registry)
     atomic_json(runtime / f'assessments-{mode}.json', {cid: result['assessment'] for cid, result in results.items()})
     atomic_json(runtime / f'diagnostics-{mode}.json', {cid: result['diagnostic'] for cid, result in results.items()})
-    usage = usage_summary(checkpoint.get('calls', []), client.cache_hits, len(requests), mode, checkpoint['run_id'])
+    usage = usage_summary(checkpoint.get('calls', []), client.cache_hits, len(requests), mode, checkpoint['run_id'],checkpoint.get('local_events',[]))
     usage['evidence_cache_hits'] = store.cache_hits
+    if hasattr(client,'daily_usage'):usage['daily_usage']={config['model']:client.daily_usage.snapshot(config['model']) for config in client.role_config.values()}
+    for model,stats in usage['models'].items():
+        logger.info('MODEL TOTALS | %s | attempted=%s | successful=%s | truncated=%s | HTTP failures=%s | validation failures=%s | local quota skips=%s | retries=%s | actual tokens=%s',model,*[stats[k] for k in ['attempted_calls','successful_calls','truncated_calls','http_failures','validation_failures','local_quota_skips','transport_retries','actual_tokens']])
     atomic_json(runtime / f'usage-{mode}.json', usage)
     if not args.samples:
         report = write_usage_report(usage, ROOT)

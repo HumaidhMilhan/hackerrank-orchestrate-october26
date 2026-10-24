@@ -22,7 +22,8 @@ class DailyQuotaError(QuotaCapacityError):
 class QuotaScheduler:
     def __init__(self, rpm=5, tpm=250000, max_concurrency=2, *, clock=time.monotonic, sleep=asyncio.sleep,
                  rpd=None, tpd=None, ledger_path=None, wall_clock=time.time,
-                 concurrency_limiter=None, settle_daily=False, settle_minute=False):
+                 concurrency_limiter=None, settle_daily=False, settle_minute=False,
+                 daily_usage=None,model=None):
         if any(type(value) is not int or value <= 0 for value in [rpm, tpm, max_concurrency]):
             raise ValueError('quota limits must be positive integers')
         self.rpm, self.tpm, self.max_concurrency = rpm, tpm, max_concurrency
@@ -40,6 +41,7 @@ class QuotaScheduler:
         self.rpd, self.tpd, self.wall_clock = rpd, tpd, wall_clock
         self.concurrency_limiter, self.settle_daily = concurrency_limiter, settle_daily
         self.settle_minute = settle_minute
+        self.daily_usage,self.model=daily_usage,model
         self.in_flight = {}
         self.provider_remaining, self.provider_reset, self.provider_epoch = None, 0.0, 0
         self.provider_limit=self.tpm
@@ -151,7 +153,7 @@ class QuotaScheduler:
                     raise DailyQuotaError('local quota ledger unreadable; refusing untracked requests')
                 while self.day_window and self.wall_clock() - self.day_window[0]['wall_at'] >= 86400:
                     self.day_window.popleft()
-                if ((self.rpd and len(self.day_window) >= self.rpd) or
+                if not self.daily_usage and ((self.rpd and len(self.day_window) >= self.rpd) or
                     (self.tpd and sum(item['tokens'] for item in self.day_window) + tokens > self.tpd)):
                     raise DailyQuotaError('local rolling daily quota exhausted')
                 while self.window and now - self.window[0]['at'] >= 60:
@@ -177,7 +179,7 @@ class QuotaScheduler:
                     if self.provider_remaining is not None:
                         self.provider_remaining-=tokens
                         entry['_provider_epoch']=self.provider_epoch
-                    if self.rpd or self.tpd or self.ledger_path:
+                    if not self.daily_usage and (self.rpd or self.tpd or self.ledger_path):
                         entry['wall_at'] = self.wall_clock()
                         daily = {'wall_at':entry['wall_at'], 'tokens':tokens, 'minute_tokens':tokens, 'operation':label}
                         entry['_daily'] = daily
@@ -201,12 +203,15 @@ class QuotaScheduler:
             future, operation, tokens, actual_tokens, guard, label,rate_headers = job
             acquired = False
             entry = None
+            daily_reservation=None
             try:
                 if future.cancelled():
                     continue
                 if self.concurrency_limiter:
                     await self.concurrency_limiter.acquire()
                     acquired = True
+                if self.daily_usage:
+                    daily_reservation=self.daily_usage.reserve(self.model,tokens,self.rpd,self.tpd)
                 async def checked_guard():
                     if future.cancelled():
                         raise asyncio.CancelledError()
@@ -253,6 +258,7 @@ class QuotaScheduler:
                 if not future.done():
                     future.set_exception(exc)
             finally:
+                if daily_reservation is not None:self.daily_usage.release(daily_reservation)
                 if entry is not None:self.in_flight.pop(id(entry),None)
                 if acquired:
                     self.concurrency_limiter.release()

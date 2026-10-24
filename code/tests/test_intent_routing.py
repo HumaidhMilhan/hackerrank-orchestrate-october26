@@ -47,11 +47,12 @@ class IntentRoutingTests(unittest.TestCase):
         self.assertEqual(result['intent'], 'DELETION')
         self.assertEqual(result['method'], 'model_review')
 
-    def test_invalid_confidence_and_missing_primary_escalate(self):
+    def test_invalid_primary_is_protocol_failure_not_semantic_review(self):
         for invalid in [None, True, 'high', float('nan'), 1.1]:
             with self.subTest(invalid=invalid):
                 result, client = self.run_case([[item(confidence=invalid)], [item()]])
-                self.assertEqual(result['method'], 'model_review')
+                self.assertEqual(result['method'], 'rules')
+                self.assertEqual(len(client.requests),1)
 
     def test_failed_or_uncertain_secondary_uses_locked_fallback(self):
         for secondary in [None, [item(confidence=0.1)], [item(phrase='invented')]]:

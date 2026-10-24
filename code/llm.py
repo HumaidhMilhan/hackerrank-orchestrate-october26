@@ -137,11 +137,13 @@ class ModelClient:
         self._ensure_loop()
         future = asyncio.run_coroutine_threadsafe(self._dispatch(*args, **kwargs), self._loop)
         try:
-            value, repair = future.result()
+            response = future.result()
+            value, repair = response[:2]
         except BaseException:
             future.cancel()
             raise
         self._repair.set(repair)
+        if len(response)>2:self._caller_outcome.set(response[2])
         return value
 
     async def request_json_async(self, *args, **kwargs):
@@ -151,8 +153,10 @@ class ModelClient:
             return None
         self._ensure_loop()
         future = asyncio.run_coroutine_threadsafe(self._dispatch(*args, **kwargs), self._loop)
-        value, repair = await asyncio.wrap_future(future)
+        response = await asyncio.wrap_future(future)
+        value, repair = response[:2]
         self._repair.set(repair)
+        if len(response)>2:self._caller_outcome.set(response[2])
         return value
 
     async def _dispatch(self, *args, **kwargs):
@@ -161,7 +165,8 @@ class ModelClient:
         task = asyncio.current_task()
         self._pending_requests.add(task)
         try:
-            return await self._request(*args, **kwargs)
+            result=await self._request(*args, **kwargs)
+            return (*result,self._request_outcome.get()) if hasattr(self,'_request_outcome') else result
         finally:
             self._pending_requests.discard(task)
 
