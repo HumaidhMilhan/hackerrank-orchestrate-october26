@@ -257,6 +257,8 @@ def interpret_media(meta, client, image, location):
                 raise ValueError('facts/location missing')
     for _ in range(2 if client.enabled else 0):
         items = client.request_json('media', MEDIA_PROMPT, MEDIA_SCHEMA, image=image, validator=validate)
+        if items is None and not getattr(client, 'retry_interpretation', True):
+            break
         if items is not None:
             return [observation(meta, item['resource_id'], item['system_id'], item['record_type'],
                                 json.loads(item['facts_json']), location + '; ' + item['supporting_text']) for item in items]

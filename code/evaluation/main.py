@@ -98,7 +98,8 @@ def main(argv=None):
                   'structured/reverse resource links, partial payloads or treatment labels accepted as compliance proof, '
                   'invalid intent responses cached before validation, unread PDF pages cached as successful extraction, '
                   'and retained-only/unknown-payload flows treated as prohibited copies. Integration regression checks also enforce the required archive-root report paths '
-                  'and prevent system names in activity prose from becoming cross-subject resource links. The suite now includes 30 tests; '
+                  'and prevent system names in activity prose from becoming cross-subject resource links. Provider regression checks cover exponential backoff/jitter, '
+                  'permanent-error handling, retry-budget ownership, and server-directed cooldowns. The suite now includes 37 tests; '
                   'live-provider quality and sample-specific accuracy tuning remain deferred until API configuration.', '',
                   'Remaining measured failures:', '', '| Case | Expected status | Actual status | Sequence correct | Expected/actual steps |',
                   '| --- | --- | --- | --- | --- |'])

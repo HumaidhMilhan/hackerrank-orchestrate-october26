@@ -75,6 +75,8 @@ def interpret_requests(requests, client, progress=None):
                     raise ValueError('no grounded intent interpretations')
                 return accepted
             response = client.request_json('intent', prompt, INTENT_SCHEMA, validator=validate_intents)
+            if response is None and not getattr(client, 'retry_interpretation', True):
+                break
             if not isinstance(response, list):
                 continue
             counts = defaultdict(int)

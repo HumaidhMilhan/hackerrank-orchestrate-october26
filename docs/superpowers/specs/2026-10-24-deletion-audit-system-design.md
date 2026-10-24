@@ -30,6 +30,8 @@ Send request text in batches of **20** for LLM interpretation. Return `case_id`,
 
 Code validates the labels, supporting spans, and that every requested case appears exactly once. Retry failed, missing, or invalid interpretations once, only for affected cases. Then apply the fallback in this exact order:
 
+User-requested transport update after live testing: the provider helper now owns up to four transient transport retries after the initial call, using exponential backoff (1, 2, 4, 8 seconds), up to 25% jitter, and a 60-second delay cap. Only HTTP 408/429/5xx, timeout, and connection/network errors qualify. Permanent client errors and exhausted transport requests go directly to fallback rather than consuming the separate interpretation-repair retry. Honor server retry timing; a requested wait above 60 seconds defers calls to that model for the indicated interval while still producing case rows. Count every physical attempt in usage. The single interpretation-repair limit applies to invalid/missing model content, not transport failures.
+
 1. **Explicit non-deletion / negation check -> NON_DELETION.** Include multilingual negation and clear access/correction/export/marketing-only requests. Match intent and the scope of negation, not isolated keywords.
 2. **Multilingual affirmative deletion stems -> DELETION.** Normalize case and Unicode and cover deletion expressions in the languages present in participant requests. Build general language patterns, not case-specific mappings.
 3. **Final default -> NON_DELETION plus warning.** This is a best-effort fallback and may be less accurate than model interpretation.
@@ -65,7 +67,7 @@ Read the manifest and actual contents of the **94** artifacts once: **24 SQL, 28
 
 LLM extraction returns observed facts and their source locations, not policy decisions, verdicts, or remediation actions. Preserve null versus missing fields. A workflow badge or successful delete operation is a claim; an actual record read or completed lookup is a scoped observation. Do not interpret a cache miss or arbitrary missing row as deletion.
 
-Retry failed extraction once; then continue with available content and a warning. Reuse cached media observations across cases rather than calling vision for each person. A text-only fallback model cannot silently replace image interpretation.
+Repair invalid extracted model content once; transient transport failures follow the provider backoff policy above. Then continue with available content and a warning. Reuse cached media observations across cases rather than calling vision for each person. A text-only fallback model cannot silently replace image interpretation.
 
 ### Case retrieval and bounded expansion
 

@@ -49,7 +49,9 @@ The source resolves its normal dataset and output paths relative to the reposito
 
 ## Behavior and limitations
 
-- Intent interpretation uses batches of 20, one retry for affected cases, then explicit non-deletion/negation, multilingual deletion stems, and finally NON_DELETION with warning.
+- Intent interpretation uses batches of 20, one repair for affected invalid/missing interpretations, then explicit non-deletion/negation, multilingual deletion stems, and finally NON_DELETION with warning.
+- API transport failures use up to four retries after the initial request: exponential delays of 1, 2, 4, and 8 seconds plus up to 25% jitter, capped at 60 seconds. Retry only HTTP 408/429/5xx, timeouts, and connection/network failures. Permanent HTTP client errors are not retried. Exhausting transport retries does not trigger another interpretation retry.
+- Respect `Retry-After` and Google's `RetryInfo` delay. A provider-requested wait longer than 60 seconds defers further calls to that model for the indicated window while cases continue through fallbacks. Every physical attempt is counted separately; failures with missing token usage remain unknown.
 - Identity links follow explicit stable user ownership and eligible history, never names/phone coincidences or numeric suffixes.
 - Evidence is parsed once, with primary/replica scopes and capture/observation times. Resource retrieval has at most two link-expansion passes.
 - Stage 3 allows one targeted recheck. Operation reports do not prove resulting state. Retention, anonymization, redaction, tombstones, active flows, and restore access are evaluated from supplied rules.
