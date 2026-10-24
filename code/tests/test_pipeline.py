@@ -99,7 +99,7 @@ class PolicyTests(unittest.TestCase):
         from stage4 import build_output
         assessment = assess_case(context(), [obs(facts={'rows': 0})], RULES, ['unread eligible evidence'])
         row, diagnostic = build_output(assessment)
-        self.assertEqual(row['deletion_status'], 'COMPLETE')
+        self.assertEqual(row['deletion_status'], 'INCOMPLETE')
         self.assertTrue(diagnostic['estimated'])
         self.assertEqual(build_output(assessment, 'incomplete')[0]['deletion_status'], 'INCOMPLETE')
 

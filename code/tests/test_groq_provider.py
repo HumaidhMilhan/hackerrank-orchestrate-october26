@@ -62,7 +62,7 @@ class GroqTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(strict['strict'])
         self.assertFalse(strict['schema']['additionalProperties'])
         self.assertFalse(strict['schema']['properties']['items']['items']['additionalProperties'])
-        self.assertTrue(self.payloads[2]['response_format']['json_schema']['strict'])
+        self.assertEqual(self.payloads[2]['response_format'],{'type':'json_object'})
         self.assertEqual(self.payloads[2]['reasoning_effort'], 'none')
         self.assertEqual(self.payloads[2]['max_completion_tokens'], 512)
         self.assertTrue(self.payloads[2]['messages'][-1]['content'][-1]['image_url']['url'].startswith('data:image/png;base64,'))
@@ -185,7 +185,7 @@ class GroqTests(unittest.IsolatedAsyncioTestCase):
              patch('groq_client.httpx.AsyncHTTPTransport',return_value=self.transport):
             client=self.client()
             self.assertEqual(client.intent_confidence_threshold,.80)
-            self.assertEqual(client.intent_batch_size,8)
+            self.assertEqual(client.intent_batch_size,4)
             await client.request_json_async('intent','one',SCHEMA)
             await client.request_json_async('media','image',SCHEMA,image=b'image')
             first=client.schedulers[client.text_model];vision=client.schedulers[client.vision_model]
@@ -204,7 +204,7 @@ class GroqTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_media_strict_schema_forbids_empty_resource_ids(self):
         from stage2 import MEDIA_SCHEMA
-        with patch('groq_client.httpx.AsyncHTTPTransport',return_value=self.transport):
+        with patch.dict(os.environ,{'GROQ_EVIDENCE_FORMAT':'strict'}),patch('groq_client.httpx.AsyncHTTPTransport',return_value=self.transport):
             client=self.client()
             await client.request_json_async('media','image',MEDIA_SCHEMA,image=b'image')
         schema=self.payloads[0]['response_format']['json_schema']['schema']

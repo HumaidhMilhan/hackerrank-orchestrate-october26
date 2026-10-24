@@ -162,7 +162,7 @@ def write_usage_report(summary, root):
 def package_code(root):
     path = root / 'code.zip'
     with zipfile.ZipFile(path, 'w', compression=zipfile.ZIP_DEFLATED) as archive:
-        candidates = [root / 'README.md', root / 'requirements.txt', root / '.env.example']
+        candidates = [root / 'README.md', root / 'requirements.txt', root / 'requirements.lock',root / '.env.example']
         candidates.extend(p for p in (root / 'code').rglob('*') if p.is_file() and p.suffix in {'.py', '.md', '.txt'})
         for source in sorted(set(candidates)):
             if source.is_file() and '__pycache__' not in source.parts:
@@ -216,7 +216,7 @@ def run(args):
     if hasattr(client, 'role_config'):
         for role, config in client.role_config.items():
             console.progress('MODEL', 0, len(requests), f"{role}={config['model']} | RPM={config['rpm']} | combined TPM={config['tpm']} | RPD={config['rpd']} | TPD={config['tpd']} | output cap={config['max_output_tokens']} | reasoning={config['reasoning_effort']} | format={config['format']}")
-        console.progress('QUOTA', 0, len(requests), f'provider concurrency={client.max_concurrency} | shared per-model async queues | review threshold={client.intent_confidence_threshold}')
+        console.progress('QUOTA', 0, len(requests), f'provider concurrency={client.max_concurrency} | separate model queues | review threshold={client.intent_confidence_threshold} | transient retry budget={client.max_retries}')
     else:
         console.progress('QUOTA', 0, len(requests), f'RPM={client.rpm} | input TPM={client.tpm} | concurrency={client.max_concurrency} | shared async SDK queue')
     signature = digest({'inputs': input_signature(dataset, request_name, client), 'uncertainty': args.uncertainty})

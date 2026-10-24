@@ -4,14 +4,15 @@ A hackathon implementation of the locked four-stage pipeline: authorization and 
 
 ## Setup
 
-Use Python 3.10 or newer from the repository root:
+Use Python 3.13 (the verified runtime) from the repository root:
 
 ```text
 python -m venv .venv
-.venv\Scripts\python -m pip install -r requirements.txt
+.venv\Scripts\python -m pip install -r requirements.lock
+.venv\Scripts\Activate.ps1
 ```
 
-On macOS/Linux use `.venv/bin/python` instead. Activate the environment or substitute its Python path in the commands below. PyMuPDF extracts PDFs; Groq's `groq` async SDK handles the default model routes. Google's `google-genai` SDK remains available for Gemini comparisons. CSV, SQLite, quota scheduling, CLI progress, tests, and packaging use the standard library.
+On macOS/Linux use `.venv/bin/python` and `source .venv/bin/activate` instead. Activate the environment or substitute its Python path in the commands below. PyMuPDF extracts PDFs; Groq's `groq` async SDK handles the default model routes. Google's `google-genai` SDK remains available for Gemini comparisons. CSV, SQLite, quota scheduling, CLI progress, tests, and packaging use the standard library.
 
 ## Configure Groq
 
@@ -24,7 +25,13 @@ GROQ_INTENT_MODEL=openai/gpt-oss-20b
 GROQ_REVIEW_MODEL=openai/gpt-oss-120b
 GROQ_EVIDENCE_MODEL=qwen/qwen3.8-27b
 GROQ_INTENT_CONFIDENCE=0.80
-GROQ_INTENT_BATCH_SIZE=8
+GROQ_INTENT_BATCH_SIZE=4
+GROQ_INTENT_MAX_OUTPUT_TOKENS=256
+GROQ_REVIEW_MAX_OUTPUT_TOKENS=512
+GROQ_EVIDENCE_MAX_OUTPUT_TOKENS=512
+GROQ_EVIDENCE_FORMAT=json
+GROQ_EVIDENCE_REASONING_EFFORT=none
+GROQ_MAX_RETRIES=1
 GROQ_MAX_CONCURRENCY=2
 GROQ_RPM=30
 GROQ_TPM=8000
@@ -32,19 +39,26 @@ GROQ_RPD=1000
 GROQ_TPD=200000
 ```
 
-Environment variables take precedence over `.env`. Never commit the key. Without a configured key, the CLI uses the locked deterministic fallback and warns that model interpretation is unavailable. `--offline` explicitly disables network calls.
+External environment variables take precedence over `.env`; the last definition of a repeated name inside the file wins. Startup logs show each effective role cap, format, effort and retry budget. Never commit the key. Without a configured key, the CLI uses the locked deterministic fallback and warns that model interpretation is unavailable. `--offline` explicitly disables network calls.
 
-GPT OSS 20B handles intent in batches of eight. Only low-confidence, missing/invalid, or rule-conflicting interpretations go to an independent GPT OSS 120B review. The review receives request text without the first model's answer. Both models must return exact case IDs, a phrase copied from the request, and finite confidence in [0,1]. Unresolved or low-confidence review results use the existing three-step fallback. Confidence is a routing heuristic, not a calibrated probability or proof of correctness.
+GPT OSS 20B handles intent in batches of four. Only low-confidence, missing/invalid, or rule-conflicting interpretations go to an independent GPT OSS 120B review. The review receives request text without the first model's answer. Both models must return exact case IDs, a phrase copied from the request, and finite confidence in [0,1]. Unresolved or low-confidence review results use the existing three-step fallback. Confidence is a routing heuristic, not a calibrated probability or proof of correctness.
 
 Qwen processes screenshots, image-only PDF pages and bounded visual rechecks. SQL, JSON, logs and text PDF extraction stay deterministic. Model output remains observations; final status, policy application and remediation order remain deterministic. Changing the model does not automatically solve evidence attribution or state-reconstruction defects.
 
 Groq's published free-plan limits for these models were checked on 25 October 2026: 30 RPM, 8000 combined TPM, 1000 RPD, 200000 TPD per model. Actual account limits can differ. See [models](https://console.groq.com/docs/models), [vision](https://console.groq.com/docs/vision), [structured outputs](https://console.groq.com/docs/structured-outputs), and [rate limits](https://console.groq.com/docs/rate-limits). Free access is quota-limited; better accuracy requires measurement.
 
-Every physical request/retry uses a per-model async queue and provider-wide concurrency limit. Queues reserve conservative UTF-8 text/schema tokens, Qwen's documented 2048 image tokens, and the entire configured output allowance. Minute reservations remain conservative and reconcile upward to actual total usage. Successful daily reservations settle to actual total usage; failures or missing usage retain their full estimates. This can deliberately underuse the available quota. Oversized jobs fall back without dispatch. Set `GROQ_{INTENT,REVIEW,EVIDENCE}_{RPM,TPM,RPD,TPD}` to override a role's limits; roles using the same model share the tightest bucket. `GROQ_{INTENT,REVIEW,EVIDENCE}_MAX_OUTPUT_TOKENS` controls output budgets (1024/1024/512 by default). Larger budgets must fit the model's local TPM allowance.
+Every physical request/retry uses a per-model async queue and provider-wide concurrency limit. Queues reserve conservative UTF-8 text/schema tokens, Qwen's documented 2048 image tokens, and the entire configured output allowance. Groq settles minute and daily reservations to actual returned quota usage, excluding provider-reported cached tokens. Queued calls wake when unused tokens are released. Missing usage retains a conservative estimate. Groq token-headroom/reset headers impose additional bounds, with other in-flight requests deducted; a learned lower provider limit also bounds aggregate usage. Request-limit headers are daily counts and never overwrite RPM. Failed calls without usage can still consume a local estimated daily budget even if the provider console shows remaining quota. This can deliberately underuse the available quota. Oversized jobs fall back without dispatch. Set `GROQ_{INTENT,REVIEW,EVIDENCE}_{RPM,TPM,RPD,TPD}` to override a role's limits; roles using the same model share the tightest bucket. `GROQ_{INTENT,REVIEW,EVIDENCE}_MAX_OUTPUT_TOKENS` controls output budgets (256/512/512 by default). Larger budgets must fit the model's local TPM allowance.
 
 Rolling 24-hour request/token reservations persist under ignored `.runtime/model_cache/groq_quotas/`, including recent minute reservations. Daily exhaustion does not make the CLI wait a day: affected calls fall back. An unreadable ledger also refuses untracked dispatch and warns. Use one CLI process per checkout; the ledger is not a cross-process or cross-machine lock. Other applications in the same organization can still consume quota. Provider 429/reset headers remain authoritative.
 
-All three default models use strict JSON Schema, with every object closed and every property required. Media resource IDs must be nonempty and match the existing record-ID syntax. Qwen uses `reasoning_effort=none`; GPT OSS uses `low` reasoning with reasoning text omitted. Override effort with `GROQ_<ROLE>_REASONING_EFFORT` and format with `GROQ_<ROLE>_FORMAT` when deliberately selecting another mode. Qwen is capped at512 output tokens; longer/truncated answers remain rejected and disclosed rather than silently raising its budget. Both also pass stage-specific grounding checks. Truncated/refused/invalid responses are never cached or automatically replayed. HTTP400 is not a transport retry; provider error codes such as `json_validate_failed` are logged without raw response bodies. Automatic SDK/HTTP retries are disabled; bounded application retries reacquire quota. Shutdown cancels queued calls and backoff waits. Accepted response caches are provider/model/prompt/schema/config isolated and consume no API quota.
+GPT OSS intent/review use strict JSON Schema; Qwen vision uses JSON Object mode with recursive local schema and stage-specific semantic validation. Vision instructions are compact and do not duplicate strict-schema metadata. Media resource IDs must be nonempty and match existing syntax. Qwen uses `reasoning_effort=none`; GPT OSS uses `low` reasoning with reasoning text omitted. The configured output caps are hard ceilings: truncated, malformed or refused replies remain rejected instead of silently increasing caps. Format and effort remain configurable per role.
+
+There is one custom transient retry budget: `GROQ_MAX_RETRIES=1` by default (0 disables retries). SDK and HTTP retries stay disabled. HTTP400 and local JSON/schema/grounding errors do not replay the request. Invalid responses are never cached. Retries reacquire the same model quota; shutdown cancels queued/backoff work.
+
+Individual call diagnostics in `.runtime/checkpoint-<mode>.json` include actual usage, finish reason, selected rate-limit headers, safe provider error codes, and validation phase/path/type. Set `AUDIT_LOG_RESPONSE_BODY=1` to include bounded response body shapes. Unknown keys, string values and numeric values are redacted, so this is not an unredacted artifact/PII log. Request prompts, credentials, authorization headers and images are never logged. Usage totals remain separate from these redacted body shapes.
+
+The clean environment and `requirements.lock` avoid the global installation's requests/HTTP dependency mismatch. Run with the activated environment or `.venv\Scripts\python.exe`. Validate with `python -m pip check`.
+
 
 Cost rates are optional and never guessed. For each role, configure `GROQ_<ROLE>_INPUT_USD_PER_MILLION`, `GROQ_<ROLE>_OUTPUT_USD_PER_MILLION`, and optionally `GROQ_<ROLE>_CACHED_USD_PER_MILLION`. Reports preserve separate model totals. Groq reasoning is already included in completion tokens and is not counted twice. Missing or conflicting prices are reported as unavailable, not zero.
 
@@ -84,14 +98,14 @@ The source resolves its normal dataset and output paths relative to the reposito
 
 ## Behavior and limitations
 
-- Groq intent uses configurable batches of eight and independent secondary review for flagged cases; Gemini retains batches of 20. Groq local JSON/schema/grounding validation errors do not trigger another attempt; a valid partial intent batch may request missing cases once. Gemini retains its existing single interpretation repair. The final fallback checks explicit non-deletion/negation first, multilingual deletion stems second, and defaults to NON_DELETION with warning.
-- SDK transport failures use up to four retries after the initial request: exponential delays of 1, 2, 4, and 8 seconds plus up to 25% jitter, capped at 60 seconds. Each attempt must reacquire shared quota. Retry only HTTP 408/429/5xx (also Groq 409), timeouts, and connection/network failures. Permanent HTTP client errors are not retried. Exhausting transport retries does not trigger another interpretation retry.
+- Groq intent uses configurable batches of four and independent secondary review for flagged cases; Gemini retains batches of 20. Groq local JSON/schema/grounding validation errors do not trigger another attempt; a valid partial intent batch may request missing cases once. Gemini retains its existing single interpretation repair. The final fallback checks explicit non-deletion/negation first, multilingual deletion stems second, and defaults to NON_DELETION with warning.
+- Groq transport retries come from `GROQ_MAX_RETRIES` (default one); Gemini retains up to four retries. Both use exponential delays of 1, 2, 4, and 8 seconds plus up to 25% jitter, capped at 60 seconds. Each attempt must reacquire shared quota. Retry only HTTP 408/429/5xx (also Groq 409), timeouts, and connection/network failures. Permanent HTTP client errors are not retried. Exhausting transport retries does not trigger another interpretation retry.
 - Respect `Retry-After`, Groq reset headers and Google's `RetryInfo` delay. A provider-requested wait longer than 60 seconds defers further calls to that model for the indicated window while cases continue through fallbacks. Every physical attempt is counted separately; failures with missing token usage remain unknown.
 - Identity links follow explicit stable user ownership and eligible history, never names/phone coincidences or numeric suffixes.
 - Evidence is parsed once, with primary/replica scopes and capture/observation times. Resource retrieval has at most two link-expansion passes.
 - Stage 3 allows one targeted recheck. Operation reports do not prove resulting state. Retention, anonymization, redaction, tombstones, active flows, and restore access are evaluated from supplied rules.
 - Stage 4 has no model calls and follows the mandated phase/operation/system/resource order. Findings and COMPLETE checks cite eligible evidence; future INCOMPLETE actions/checks have empty evidence IDs.
-- Recoverable failures do not drop cases. The selected best-evidence fallback may estimate COMPLETE when known observations are compliant but coverage is uncertain. With no usable state evidence, the last resort is INCOMPLETE with available steps, possibly an empty array. These guarantee row coverage, not semantic correctness; diagnostics disclose the estimates. `--uncertainty incomplete` uses the conservative comparison policy.
+- Recoverable failures do not drop cases. An eligible initial extraction failure or targeted observer recheck failure always prevents COMPLETE, preserving prior facts without inventing findings. Best-evidence can still estimate COMPLETE for other uncertainty, while `--uncertainty incomplete` treats all uncertainty conservatively. With no usable state evidence, the last resort is INCOMPLETE with available steps, possibly an empty array. These guarantee row coverage, not semantic correctness; diagnostics disclose the estimates. `--uncertainty incomplete` uses the conservative comparison policy.
 
 Accepted extraction and compatible case checkpoints live under ignored `.runtime/`. `--resume` reuses only a compatible input/source/configuration signature. This directory also contains assessments, diagnostics, and per-run usage. Do not package it or share credential-bearing provider files.
 

@@ -455,8 +455,15 @@ class EvidenceStore:
         for evidence_id in sorted(seen):
             meta = self.artifacts.get(evidence_id)
             if meta and Path(meta['file_path']).suffix.lower() == '.png' and self.client.enabled:
-                raw = (self.dataset / meta['file_path']).read_bytes()
-                parsed = interpret_media(meta, self.client, raw, 'screenshot recheck')
+                try:
+                    raw = (self.dataset / meta['file_path']).read_bytes()
+                    parsed = interpret_media(meta, self.client, raw, 'screenshot recheck')
+                except Exception as exc:
+                    logging.getLogger('audit').warning('%s: visual recheck failed (%s); retaining prior observations',
+                                                     evidence_id,type(exc).__name__)
+                    parsed=None
+                if parsed is None and not any(x['file_id']==evidence_id for x in self.failures):
+                    self.failures.append(meta)
                 if parsed:
                     refreshed.extend(o for o in parsed if o['resource_id'] in {s['resource_id'] for s in observations} and eligible(o, context['audit_at']))
                 break

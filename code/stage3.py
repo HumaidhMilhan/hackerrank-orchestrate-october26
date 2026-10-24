@@ -218,6 +218,7 @@ def assess_case(context, observations, rules, extraction_warnings=None):
     return {'case_id': context['case_id'], 'intent': context['intent'], 'audit_at': context['audit_at'],
             'resources': resources, 'warnings': sorted(set(warnings)),
             'process_paths': graph,
+            'observation_failure':bool(extraction_warnings),
             'uncertain': bool(extraction_warnings) or any(r['assessment'] == 'UNCERTAIN' for r in resources)}
 
 

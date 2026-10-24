@@ -32,11 +32,13 @@ def build_output(assessment, uncertainty='best-evidence'):
         return {'case_id': assessment['case_id'], 'deletion_status': 'NOT_APPLICABLE', 'steps_json': '[]'}, {'estimated': False, 'warnings': warnings}
     violations = [r for r in resources if r['assessment'] == 'VIOLATION']
     compliant = [r for r in resources if r['assessment'] == 'COMPLIANT' and r.get('evidence_id')]
-    uncertain = assessment.get('uncertain', False) or any(r['assessment'] == 'UNCERTAIN' for r in resources)
+    observer_failed=assessment.get('observation_failure',False)
+    uncertain = observer_failed or assessment.get('uncertain', False) or any(r['assessment'] == 'UNCERTAIN' for r in resources)
     estimated = bool(uncertain and not violations)
     status = 'INCOMPLETE' if violations else ('COMPLETE' if compliant else 'INCOMPLETE')
-    if uncertainty == 'incomplete' and uncertain:
+    if observer_failed or uncertainty == 'incomplete' and uncertain:
         status = 'INCOMPLETE'
+    if observer_failed:warnings.append('observer failure prevents evidence-backed completion')
     if not resources or not compliant and not violations:
         estimated = True
         warnings.append('no usable state evidence; last-resort INCOMPLETE')

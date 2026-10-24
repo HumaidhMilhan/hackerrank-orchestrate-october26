@@ -54,6 +54,7 @@ def retry_after_seconds(error):
 def load_env(path):
     if not Path(path).is_file():
         return
+    values={}
     for line in Path(path).read_text(encoding='utf-8-sig').splitlines():
         line = line.strip()
         if not line or line.startswith('#') or '=' not in line:
@@ -61,7 +62,8 @@ def load_env(path):
         name, value = line.split('=', 1)
         name = name.strip().removeprefix('export ')
         if name.isidentifier():
-            os.environ.setdefault(name, value.strip().strip('\"\''))
+            values[name]=value.strip().strip('\"\'')
+    for name,value in values.items():os.environ.setdefault(name,value)
 
 
 class ModelClient:
