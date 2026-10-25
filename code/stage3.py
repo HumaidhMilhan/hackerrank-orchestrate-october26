@@ -112,7 +112,7 @@ def flow_risk(obs, observations, rules, context):
     """True: prohibited payload path, False: explicit permitted scope, None: unknown."""
     facts, fields = obs['facts'], flatten(obs['facts'])
     selector = normalize(next((fields[key] for key in ['subject_selector','subject_reference','customer_reference',
-                            'subject_ref','lookup_key','subject_key'] if fields.get(key)),''))
+                            'subject_ref','lookup_key','subject_key','customer_email','owner_email','email'] if fields.get(key)),''))
     if selector and ('@' in selector or selector.startswith('user_')) and selector not in context['identifiers']:
         return False
     categories = facts.get('data_categories', facts.get('copied_categories', fields.get('payload_category')))
@@ -133,7 +133,10 @@ def flow_risk(obs, observations, rules, context):
     # A subject-selected customer connector feeding an analytics destination is
     # observable copy capability; a bare enabled flag supplies no such scope.
     description = normalize(str(fields.get('connector_name', '')) + ' ' + str(fields.get('destination', '')))
-    if selector in context['identifiers'] and re.search(r'customer|profile|personal', description) and re.search(r'analytics|warehouse|search|export', description):
+    if selector in context['identifiers'] and re.search(r'customer|profile|personal|identity|contact', description) and re.search(r'analytics|warehouse|search|export', description):
+        return True
+    if selector in context['identifiers'] and re.search(r'customer|profile|personal|identity|contact',description) and \
+            re.search(r'connector|sync|bridge|import|indexer',description) and normalize(fields.get('last_delivery_status')) in {'delivered','running','active','success'}:
         return True
     if selector in context['identifiers'] and (fields.get('event')=='connector_heartbeat' or
         obs.get('category')=='DATA_FLOW' and fields.get('result')=='ACTIVE'):
@@ -217,7 +220,8 @@ def assess_case(context, observations, rules, extraction_warnings=None):
         action, expected, rule_id = requirement(last['category'], rules)
         resources.append({'system_id': system, 'resource_id': resource, 'category': last['category'],
                           'state': 'UNKNOWN', 'action': action, 'expected_state': expected, 'rule_id': rule_id,
-                          'assessment': 'UNCERTAIN', 'evidence_id': '', 'scope_assessments': []})
+                          'assessment': 'UNCERTAIN', 'evidence_id': '', 'scope_assessments': [],
+                          'identity_only_link':all(event['facts'].get('event_type')=='LINK_RESOURCE_IDENTITY' for event in events)})
         warnings.append(f'{resource}: operation/linkage claims only; state unknown')
     graph = process_paths([o for o in observations if eligible(o, context['audit_at'])])
     for resource in resources:

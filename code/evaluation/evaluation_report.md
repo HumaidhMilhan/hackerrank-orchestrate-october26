@@ -8,14 +8,14 @@ Requests: 32. These are public sample measurements, not hidden 518-case accuracy
 | --- | ---: |
 | status accuracy | 90.625% |
 | exact row accuracy | 28.125% |
-| step precision | 94.872% |
-| step recall | 76.684% |
-| step f1 | 84.814% |
-| field accuracy | 60.334% |
+| step precision | 97.546% |
+| step recall | 82.383% |
+| step f1 | 89.326% |
+| field accuracy | 69.752% |
 | sequence accuracy | 28.125% |
 
-Exact step matches: 148 / 156 predicted and 193 expected.
-Aligned field matches: 832 / 1379.
+Exact step matches: 159 / 163 predicted and 193 expected.
+Aligned field matches: 957 / 1372.
 
 Step comparison excludes step_no but retains all other fields including evidence IDs. Field comparison uses aligned array positions; missing steps count as seven mismatches. Sequence comparison includes every field and array order. JSON key order and whitespace are ignored.
 
@@ -90,9 +90,9 @@ Remaining measured failures:
 | case_08 | INCOMPLETE | INCOMPLETE | False | 4/3 |
 | case_09 | INCOMPLETE | INCOMPLETE | False | 5/3 |
 | case_10 | INCOMPLETE | INCOMPLETE | False | 4/3 |
-| case_17 | INCOMPLETE | INCOMPLETE | False | 5/7 |
-| case_18 | INCOMPLETE | INCOMPLETE | False | 14/10 |
-| case_20 | INCOMPLETE | INCOMPLETE | False | 8/4 |
+| case_17 | INCOMPLETE | INCOMPLETE | False | 5/6 |
+| case_18 | INCOMPLETE | INCOMPLETE | False | 14/12 |
+| case_20 | INCOMPLETE | INCOMPLETE | False | 8/6 |
 | case_21 | COMPLETE | COMPLETE | False | 3/1 |
 | case_22 | INCOMPLETE | INCOMPLETE | False | 8/7 |
 | case_23 | INCOMPLETE | INCOMPLETE | False | 8/6 |
@@ -101,8 +101,8 @@ Remaining measured failures:
 | case_26 | COMPLETE | COMPLETE | False | 6/4 |
 | case_27 | COMPLETE | COMPLETE | False | 6/4 |
 | case_28 | COMPLETE | COMPLETE | False | 6/4 |
-| case_29 | INCOMPLETE | INCOMPLETE | False | 14/10 |
-| case_30 | INCOMPLETE | INCOMPLETE | False | 14/10 |
+| case_29 | INCOMPLETE | INCOMPLETE | False | 14/12 |
+| case_30 | INCOMPLETE | INCOMPLETE | False | 14/12 |
 | case_31 | COMPLETE | COMPLETE | False | 3/2 |
 | case_32 | INCOMPLETE | INCOMPLETE | False | 5/4 |
 

@@ -147,6 +147,11 @@ Challenge: https://wwww.hackerrank.com/contests/hackerrank-orchestrate-october26
 
 ## Calibrated sample validation
 
-The latest verified public-sample deletion-status accuracy is **29/32 (90.625%)**, up from 22/32 (68.75%). Both live routing and deterministic hosted-API-offline fallback reach the same status result. Exact row/sequence agreement remains 28.125%; step F1 is 84.81%. The public samples guided calibration, so these are development-set metrics, not hidden-set accuracy claims. No sample answer lookup or case/resource-number mapping is used during prediction.
+The latest verified public-sample deletion-status accuracy is **29/32 (90.625%)**, up from 22/32 (68.75%). Both live routing and deterministic hosted-API-offline fallback reach the same status result. Exact row/sequence agreement remains 28.125%; step F1 is 89.33%. The public samples guided calibration, so these are development-set metrics, not hidden-set accuracy claims. No sample answer lookup or case/resource-number mapping is used during prediction.
 
 See `code/evaluation/calibration_report.md` for measured runs, remaining evidence/ownership gaps, local fallback limits and verification. The original submission output and its full-run usage report are preserved; a separate final-code518-row validation artifact is under ignored `.runtime/full-calibration-validation/`.
+
+
+The later exact-array calibration still matches 9/32 whole ordered arrays (28.125%); the requested 80% whole-array gate is unmet. Exact individual-step F1 improved to 89.326%. See `code/evaluation/exact_step_report.md` for grounded corrections and the remaining ownership/cutoff gaps. Individual-step F1 must not be reported as whole-array accuracy.
+
+Atomic checkpoint/output replacement retries brief file-sharing permission failures with a bounded budget. A persistent denial preserves the prior artifact and is reported as an error; it is never counted as a successful write.

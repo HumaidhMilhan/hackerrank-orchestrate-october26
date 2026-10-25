@@ -11,7 +11,7 @@ from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 
-from common import VERSION, atomic_json, digest, read_csv
+from common import VERSION, atomic_json, atomic_replace, digest, read_csv
 from llm import ModelClient, load_env
 from stage1 import IdentityIndex, interpret_requests
 from stage2 import EvidenceStore
@@ -59,7 +59,7 @@ def write_output(path, rows, requests, registry):
         writer = csv.DictWriter(handle, fieldnames=['case_id', 'deletion_status', 'steps_json'], lineterminator='\n')
         writer.writeheader()
         writer.writerows(sorted(rows, key=lambda r: r['case_id']))
-    temp.replace(path)
+    atomic_replace(temp,path)
 
 
 def input_signature(dataset, requests_file, client):

@@ -63,6 +63,10 @@ def build_output(assessment, uncertainty='best-evidence'):
             if resource['assessment'] == 'COMPLIANT' and resource.get('evidence_id'):
                 add(resource, 'VERIFICATION', verification, resource['evidence_id'])
         else:
+            if resource.get('identity_only_link'):
+                # A catalog alias alone retains uncertainty without creating a
+                # record treatment plan. Worker targets still need future checks.
+                continue
             if resource['assessment'] == 'VIOLATION' and resource.get('evidence_id'):
                 if finding:
                     add(resource, 'FINDING', finding, resource['evidence_id'])

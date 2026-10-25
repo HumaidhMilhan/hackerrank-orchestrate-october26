@@ -62,10 +62,12 @@ def category_for(collection='', system='', facts=None, resource=''):
     if system in {'account_failover_replica','account_replication_cluster','profile_service'}:
         system='account_service'
     elif system=='support_replica':system='support_platform'
-    if 'contact_lookup' in collection and 'email_opt_in' in facts:
-        return system,'MARKETING_PROFILE'
     if facts.get('record_type'):
         return facts.get('system', system), facts['record_type']
+    if 'contact_lookup' in collection and 'email_opt_in' in facts:
+        return system,'MARKETING_PROFILE'
+    if 'contact_' in collection and normalize(facts.get('source'))=='legacy_contact_index':
+        return system,'SECONDARY_IDENTIFIER'
     for token, origin, category in COLLECTIONS:
         if token in collection.lower():
             return system or origin, category
@@ -168,7 +170,7 @@ KV_RE = re.compile(r'([A-Za-z_][\w.-]*)=(?:"([^"\n]*)"|\'([^\'\n]*)\'|([^\s|]+))
 
 
 def parse_logs(meta, text):
-    output, contexts = [], {}
+    output, contexts, boundaries = [], {}, {}
     for number, original in enumerate(text.splitlines(), 1):
         time_match = TIME_RE.search(original)
         if not time_match:
@@ -205,9 +207,17 @@ def parse_logs(meta, text):
             pipe = [s.strip() for s in line.split('|')]
             event = match.group(1) if match else (pipe[4] if len(pipe) >= 5 else '')
         if trace:
+            previous=boundaries.get(trace)
+            resource=facts.get('resource_id')
+            new_read=str(event).endswith('_started')
+            changed=previous and ((service and previous[0] and service!=previous[0]) or
+                (resource and previous[1] and resource!=previous[1]))
+            if new_read or changed:contexts[trace]={}
+            boundaries[trace]=(service,resource if new_read or resource else previous[1] if previous else None)
             prior = contexts.setdefault(trace, {})
             # Lookup identity can be on a separate line; never inherit a result/state from a prior read.
-            for key in ['lookup_key', 'match_key', 'subject_key', 'subject_ref', 'correlation_key', 'customer_email', 'customer_reference']:
+            for key in ['lookup_key', 'match_key', 'subject_key', 'subject_ref', 'correlation_key', 'customer_email', 'customer_reference',
+                        'source','collection','record_type']:
                 if key in facts and facts[key] is not None:
                     prior[key] = facts[key]
             facts = {**prior, **facts}

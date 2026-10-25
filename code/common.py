@@ -3,6 +3,7 @@ import csv
 import hashlib
 import json
 import re
+import time
 import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
@@ -40,12 +41,24 @@ def read_csv(path):
         return list(csv.DictReader(handle))
 
 
+def atomic_replace(source,target):
+    """Retry brief sharing denials; never claim a permanently denied write worked."""
+    delays=[.02,.05,.1,.2]
+    for attempt in range(len(delays)+1):
+        try:
+            Path(source).replace(target)
+            return
+        except PermissionError:
+            if attempt==len(delays):raise
+            time.sleep(delays[attempt])
+
+
 def atomic_json(path, value):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     temp = path.with_suffix(path.suffix + '.tmp')
     temp.write_text(json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2), encoding='utf-8')
-    temp.replace(path)
+    atomic_replace(temp,path)
 
 
 def digest(value):

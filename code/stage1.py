@@ -240,6 +240,6 @@ class IdentityIndex:
         if len(candidates) > 1:
             warnings.append('ambiguous subject ownership; candidate links require evidence')
             identifiers = {request_email}  # do not mix both people's aliases
-        return {'case_id': case['case_id'], 'audit_at': case['audit_at'], 'intent': intent,
+        return {'case_id': case['case_id'], 'audit_at': case['audit_at'], 'requested_at':case.get('requested_at'), 'intent': intent,
                 'user_ids': candidates, 'identifiers': sorted(identifiers),
                 'identity_sources': {uid: sources[uid] for uid in candidates}, 'warnings': warnings}
