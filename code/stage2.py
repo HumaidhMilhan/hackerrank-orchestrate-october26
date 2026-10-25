@@ -8,6 +8,7 @@ from pathlib import Path
 
 from common import (EMAIL_RE, RESOURCE_RE, TIME_RE, USER_RE, VERSION, atomic_json,
                     digest, eligible, flatten, identifiers, normalize, read_csv, timestamp)
+from screen_ocr import read_screen
 
 
 COLLECTIONS = [
@@ -48,10 +49,21 @@ RESOURCE_CATEGORIES = {
     'marketing': ('marketing_platform', 'MARKETING_PROFILE'), 'cache': ('cache_service', 'CACHE_ENTRY'),
     'delivery_log': ('notification_service', 'EMAIL_DELIVERY_LOG'), 'telemetry': ('analytics_platform', 'PRODUCT_TELEMETRY'),
 }
+FILE_ALIAS_RE=re.compile(r'\b[\w.-]+\.(?:pdf|png|jpg|jpeg|zip|csv|json)\b',re.I)
+
+
+def file_aliases(text):
+    return {normalize(value) for value in FILE_ALIAS_RE.findall(str(text))}
 
 
 def category_for(collection='', system='', facts=None, resource=''):
     facts = facts or {}
+    # Replication topology is a scope of the owning service, not a new policy system.
+    if system in {'account_failover_replica','account_replication_cluster','profile_service'}:
+        system='account_service'
+    elif system=='support_replica':system='support_platform'
+    if 'contact_lookup' in collection and 'email_opt_in' in facts:
+        return system,'MARKETING_PROFILE'
     if facts.get('record_type'):
         return facts.get('system', system), facts['record_type']
     for token, origin, category in COLLECTIONS:
@@ -246,19 +258,23 @@ SEARCH_INDEX_ENTRY, USER_EXPORT, SECURITY_AUDIT_LOG, LEGAL_HOLD_RECORD, BACKUP_A
 MARKETING_PROFILE, EMAIL_DELIVERY_LOG, PRODUCT_TELEMETRY, CACHE_ENTRY, SECONDARY_IDENTIFIER when grounded.'''
 
 
-def interpret_text(meta,client,text):
+def interpret_text(meta,client,text,resource_filter=None):
     def validate(items):
         if not isinstance(items,list):raise ValueError('expected record list')
         for item in items:
             facts=json.loads(item['facts_json'])
             if not isinstance(facts,dict) or not item['resource_id'] or item['resource_id'] not in text:
                 raise ValueError('unsupported resource')
+            if resource_filter and item['resource_id'] not in resource_filter:raise ValueError('outside requested resources')
             if not item['supporting_text'] or item['supporting_text'] not in text:raise ValueError('unsupported quote')
             for value in flatten(facts).values():
                 if str(value).lower() not in text.lower():raise ValueError('unsupported fact')
     if not client.enabled:return None
     items=client.request_json('text_observation','Extract business record rows only from this text. '
-        'Copy exact resource IDs, facts, and supporting_text quotes. Never infer absence or verdicts. SOURCE: '+text,
+        'Copy literal resource IDs, concise facts and short supporting_text quotes. Unknown system/type: empty string. '
+        'Copy visible flag values as strings; omit fields not visible. Do not attach selected-panel values to neighboring rows '
+        'or to IDs that appear only as links. Never infer absence or verdicts. '+
+        ('Only these resource IDs: '+','.join(resource_filter)+'. ' if resource_filter else '')+'SOURCE: '+text,
         MEDIA_SCHEMA,validator=validate)
     if items is None:return None
     return media_rows(meta,items,'text')
@@ -341,8 +357,11 @@ class EvidenceStore:
         self.artifacts = {}
         self.by_identifier = defaultdict(list)
         self.by_resource = defaultdict(list)
+        self.by_alias = defaultdict(list)
         self.cache_hits = 0
-        self.parser_signature = digest(Path(__file__).read_bytes() + Path(__file__).with_name('common.py').read_bytes())
+        self.local_observers={'engine':'rapidocr-onnxruntime/1.2.3','screens':0,'inference_calls':0,'cache_hits':0,'seconds':0}
+        self.parser_signature = digest(b''.join(Path(__file__).with_name(name).read_bytes()
+            for name in ['stage2.py','common.py','screen_ocr.py','visual_observer.py']))
 
     def prepare(self):
         manifest = read_csv(self.dataset / 'evidence_files.csv')
@@ -395,6 +414,8 @@ class EvidenceStore:
         for obs in self.activities:
             obs['linked_resources'] = sorted(set(obs['linked_resources']) & known_resources)
         for obs in self.observations + self.activities:
+            if obs['facts'].get('object_key'):
+                for alias in file_aliases(obs['facts']['object_key']):self.by_alias[alias].append(obs)
             for resource in {obs['resource_id'], *obs.get('linked_resources', [])}:
                 self.by_resource[resource].append(obs)
             for identifier in obs['identifiers']:
@@ -404,6 +425,42 @@ class EvidenceStore:
     def _parse(self, meta, path, raw):
         suffix = path.suffix.lower()
         if suffix in {'.png','.jpg','.jpeg','.webp'}:
+            screen=read_screen(raw,self.cache_dir.parent/'ocr_cache')
+            self.local_observers['screens']+=1
+            self.local_observers['cache_hits']+=int(bool(screen.get('cache_hit')))
+            self.local_observers['inference_calls']+=int(not screen.get('cache_hit') and bool(screen.get('engine')))
+            self.local_observers['seconds']+=screen.get('seconds',0)
+            meta.update({key:screen.get(key,[]) for key in ['scope_complete','possible_identifiers','possible_resources',
+                                                          'possible_aliases','primary_aliases']})
+            if screen.get('scope_complete'):
+                if not screen['possible_resources']:
+                    compact=re.sub(r'\W','',screen.get('text','').casefold())
+                    if 'objectstorage' in compact and all(word in compact for word in ['name','size','version']) and screen.get('possible_aliases'):
+                        # A readable object table has real filename keys even if
+                        # it does not display internal catalog IDs. Preserve each
+                        # row; ownership/treatment need a separate grounded link.
+                        rows=[observation(meta,alias,'object_storage','',
+                            {'object_key':alias,'record_exists':True,'storage_listing':True},'OCR object listing; '+alias)
+                            for alias in screen['possible_aliases']]
+                        # Do not discard visible ownership simply because this
+                        # generic listing parser cannot safely attach it per row.
+                        if screen.get('possible_identifiers'):raise PartialExtraction(rows)
+                        return rows
+                    return None
+                logging.getLogger('audit').info('%s: local OCR -> text observer | visible resource references=%d',
+                                               meta['file_id'],len(screen['possible_resources']))
+                # Text normalization uses the 20B queue. It never sends an image
+                # or treats a failed observation as a positive policy fact.
+                output=[];complete=True
+                for start in range(0,len(screen['possible_resources']),2):
+                    selected=screen['possible_resources'][start:start+2]
+                    rows=interpret_text(meta,self.client,screen['text'],selected)
+                    if rows is None:complete=False
+                    else:output.extend(rows)
+                if not complete:
+                    if output:raise PartialExtraction(output)
+                    return None
+                return output
             mime={'.png':'image/png','.jpg':'image/jpeg','.jpeg':'image/jpeg','.webp':'image/webp'}[suffix]
             return interpret_media(meta, self.client, raw, 'screenshot',mime)
         if suffix == '.pdf':
@@ -444,6 +501,33 @@ class EvidenceStore:
                 if eligible(obs, cutoff) and attributable(obs):
                     selected[(obs['evidence_id'], obs['location'], obs['resource_id'])] = obs
                     resources.add(obs['resource_id'])
+        # A catalog link supplies identity/alias metadata only; the actual object
+        # presence must come from an independently read, eligible listing.
+        for link in list(selected.values()):
+            if link['facts'].get('event_type')!='LINK_RESOURCE_IDENTITY':continue
+            for alias in file_aliases(link['facts'].get('details','')):
+                candidates=[row for row in self.activities if eligible(row,cutoff) and
+                    row['facts'].get('event_type')=='LINK_RESOURCE_IDENTITY' and alias in file_aliases(row['facts'].get('details',''))]
+                def binding_key(row):
+                    details=row['facts'].get('details','')
+                    owners=set(USER_RE.findall(details)) or set(EMAIL_RE.findall(details))
+                    return row['system_id'],row['resource_id'],tuple(sorted(normalize(owner) for owner in owners))
+                if len({binding_key(row) for row in candidates})!=1:continue
+                for source in self.by_alias.get(alias,[]):
+                    if not eligible(source,cutoff):continue
+                    details=link['facts'].get('details','')
+                    exclusive=all(re.search(r'\bbelongs only\b',row['facts'].get('details',''),re.I) for row in candidates)
+                    category='SUPPORT_ATTACHMENT' if exclusive and 'attachment' in details.casefold() else ''
+                    facts={**source['facts'],'resource_id':link['resource_id'],'catalog_binding':link['evidence_id']}
+                    owners=sorted(set(USER_RE.findall(details)))
+                    if len(owners)==1:facts['subject_reference']=owners[0]
+                    row={**source,'resource_id':link['resource_id'],'system_id':link['system_id'],'category':category,'facts':facts,
+                         'captured_at':max([source['captured_at'],link['captured_at']],key=timestamp),
+                         'identifiers':sorted(set(source['identifiers'])|identifiers(link['facts'])),
+                         'location':source['location']+'; catalog '+link['evidence_id']}
+                    if attributable(row):
+                        selected[(row['evidence_id'],row['location'],row['resource_id'])]=row
+                        resources.add(row['resource_id'])
         # An eligible source row can supply explicit ownership when a current
         # identity snapshot is unavailable at the cutoff. Do not infer ownership
         # from a name, shared phone, or arbitrary co-occurrence in free text.
@@ -482,8 +566,27 @@ class EvidenceStore:
 
     def warnings_for(self, context):
         cutoff = timestamp(context['audit_at'])
+        selected={row['resource_id'] for row in self.retrieve(context)}
+        def relevant(meta):
+            if not meta.get('scope_complete'):return True
+            owners=set(meta.get('possible_identifiers',[]));resources=set(meta.get('possible_resources',[]))
+            direct_scope=bool(owners)
+            if owners.intersection(context['identifiers']):return True
+            aliases=meta.get('possible_aliases',[])
+            if not resources and aliases:
+                # Filenames are references, not subject identifiers. Bind them
+                # through an eligible catalog statement before excluding anyone.
+                for alias in aliases:
+                    links=[row for row in self.activities if row['facts'].get('event_type')=='LINK_RESOURCE_IDENTITY'
+                           and eligible(row,context['audit_at']) and normalize(alias) in file_aliases(row['facts'].get('details',''))]
+                    if not links:
+                        if not direct_scope:return True
+                        continue
+                    for row in links:
+                        owners.update(identifiers(row['facts']));resources.add(row['resource_id'])
+            return bool(owners.intersection(context['identifiers']) or resources.intersection(selected))
         return [meta['file_id'] + ': unread/failed extraction may affect coverage' for meta in self.failures
-                if timestamp(meta['captured_at']) and timestamp(meta['captured_at']) <= cutoff]
+                if timestamp(meta['captured_at']) and timestamp(meta['captured_at']) <= cutoff and relevant(meta)]
 
     def recheck(self, context, observations):
         """One bounded, read-only refresh of relevant indexed source observations."""
@@ -496,7 +599,7 @@ class EvidenceStore:
             if meta and Path(meta['file_path']).suffix.lower() == '.png' and self.client.enabled:
                 try:
                     raw = (self.dataset / meta['file_path']).read_bytes()
-                    parsed = interpret_media(meta, self.client, raw, 'screenshot recheck')
+                    parsed = self._parse(meta,Path(meta['file_path']),raw)
                 except Exception as exc:
                     logging.getLogger('audit').warning('%s: visual recheck failed (%s); retaining prior observations',
                                                      evidence_id,type(exc).__name__)

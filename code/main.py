@@ -308,6 +308,7 @@ def run(args):
     atomic_json(runtime / f'diagnostics-{mode}.json', {cid: result['diagnostic'] for cid, result in results.items()})
     usage = usage_summary(checkpoint.get('calls', []), client.cache_hits, len(requests), mode, checkpoint['run_id'],checkpoint.get('local_events',[]))
     usage['evidence_cache_hits'] = store.cache_hits
+    usage['local_observers']=store.local_observers
     if hasattr(client,'daily_usage'):usage['daily_usage']={config['model']:client.daily_usage.snapshot(config['model']) for config in client.role_config.values()}
     for model,stats in usage['models'].items():
         logger.info('MODEL TOTALS | %s | attempted=%s | successful=%s | truncated=%s | HTTP failures=%s | validation failures=%s | local quota skips=%s | retries=%s | actual tokens=%s',model,*[stats[k] for k in ['attempted_calls','successful_calls','truncated_calls','http_failures','validation_failures','local_quota_skips','transport_retries','actual_tokens']])

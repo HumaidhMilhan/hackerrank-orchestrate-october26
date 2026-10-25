@@ -14,7 +14,8 @@ def load_rules(dataset):
 
 
 def nonempty(value):
-    return value is not None and normalize(value) not in {'', 'null', 'none', '[redacted]', 'redacted', 'anonymous', 'anonymized', 'n/a'}
+    return value is not None and normalize(value) not in {'', 'null', 'none', '[redacted]', 'redacted', 'anonymous', 'anonymized', 'n/a',
+                                                         '\u2014','-','[removed]'}
 
 
 def exposed(facts, category, context):
@@ -110,7 +111,8 @@ def requirement(category, rules):
 def flow_risk(obs, observations, rules, context):
     """True: prohibited payload path, False: explicit permitted scope, None: unknown."""
     facts, fields = obs['facts'], flatten(obs['facts'])
-    selector = normalize(fields.get('subject_selector'))
+    selector = normalize(next((fields[key] for key in ['subject_selector','subject_reference','customer_reference',
+                            'subject_ref','lookup_key','subject_key'] if fields.get(key)),''))
     if selector and ('@' in selector or selector.startswith('user_')) and selector not in context['identifiers']:
         return False
     categories = facts.get('data_categories', facts.get('copied_categories', fields.get('payload_category')))
@@ -133,6 +135,9 @@ def flow_risk(obs, observations, rules, context):
     description = normalize(str(fields.get('connector_name', '')) + ' ' + str(fields.get('destination', '')))
     if selector in context['identifiers'] and re.search(r'customer|profile|personal', description) and re.search(r'analytics|warehouse|search|export', description):
         return True
+    if selector in context['identifiers'] and (fields.get('event')=='connector_heartbeat' or
+        obs.get('category')=='DATA_FLOW' and fields.get('result')=='ACTIVE'):
+        return True
     return None
 
 
@@ -150,8 +155,10 @@ def assess_case(context, observations, rules, extraction_warnings=None):
     scoped = defaultdict(list)
     for (system, resource, scope), rows in sorted(grouped.items()):
         # Latest actual observation; equivalent observations have a deterministic tie break.
-        when = max(timestamp(row['observed_at']) for row in rows)
-        latest = [row for row in rows if timestamp(row['observed_at']) == when]
+        # A marker/metadata check does not replace an earlier completed record read.
+        conclusive=[row for row in rows if observed_state(row,context)!='UNKNOWN']
+        when = max(timestamp(row['observed_at']) for row in (conclusive or rows))
+        latest = [row for row in (conclusive or rows) if timestamp(row['observed_at']) == when]
         chosen = min(latest, key=lambda row: (row['evidence_id'], row['location']))
         category = chosen['category']
         # Explicit attachment metadata beats a generic support resource prefix.
@@ -187,7 +194,8 @@ def assess_case(context, observations, rules, extraction_warnings=None):
             event = claim['facts'].get('event_type', '')
             if timestamp(claim['observed_at']) > when and event in {'DELETE_RECORD', 'REDACT_RECORD', 'ANONYMIZE_RECORD', 'SYNC_RECORD', 'RESTORE_BACKUP', 'UPDATE_RECORD', 'INDEX_RECORD', 'DISABLE_DATA_FLOW', 'BLOCK_RESTORE'}:
                 warnings.append(f'{resource}: later {event} claim lacks a confirming state observation')
-                if assessment == 'COMPLIANT':
+                preserves_absence=state=='ABSENT' and event in {'DELETE_RECORD','REDACT_RECORD','ANONYMIZE_RECORD'}
+                if assessment == 'COMPLIANT' and not preserves_absence:
                     assessment = 'UNCERTAIN'
         scoped[(system, resource)].append({'system_id': system, 'resource_id': resource, 'category': category,
                                            'state': state, 'action': action, 'expected_state': expected,

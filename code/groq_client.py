@@ -303,12 +303,12 @@ class GroqModelClient(ModelClient):
             if delay > self.max_delay:
                 usage['provider_retry_after_seconds'] = delay
                 self.logger.warning('Groq %s | %s | %s; cooldown %.1fs; using %s', task, model, reason, delay,
-                    'UNKNOWN observation fallback' if task=='media' else 'deterministic rule fallback')
+                    'UNKNOWN observation fallback' if task in {'media','text_observation'} else 'deterministic rule fallback')
                 return None
             if not transient or attempt == self.max_retries:
                 self.logger.warning('Groq %s | %s | %s; %s; using %s', task, model, reason,
                                     'retry budget exhausted' if transient else 'no transport retry',
-                                    'UNKNOWN observation fallback' if task=='media' else 'deterministic rule fallback')
+                                    'UNKNOWN observation fallback' if task in {'media','text_observation'} else 'deterministic rule fallback')
                 return None
             base = min(self.max_delay, self.initial_delay * 2 ** attempt)
             delay = max(delay, min(self.max_delay, base + random.uniform(0, base * .25)))
@@ -344,7 +344,7 @@ class GroqModelClient(ModelClient):
                 return value,True
             except (OSError,ValueError,TypeError,KeyError,IndexError):pass
         usage=None;raw_text='';phase='configuration'
-        fallback='UNKNOWN observation fallback' if role=='EVIDENCE' or task.startswith('evidence') else 'deterministic rule fallback'
+        fallback='UNKNOWN observation fallback' if role=='EVIDENCE' or task.startswith('evidence') or task=='text_observation' else 'deterministic rule fallback'
         try:
             self._guard(model);self._initialize_sdk()
             wire_schema = json_schema(VISION_SCHEMA) if native else {

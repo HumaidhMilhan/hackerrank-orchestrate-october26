@@ -73,7 +73,7 @@ def main(argv=None):
              f"Requests: {metrics['cases']}. These are public sample measurements, not hidden 518-case accuracy.", '',
              '| Metric | Result |', '| --- | ---: |']
     for key in ['status_accuracy', 'exact_row_accuracy', 'step_precision', 'step_recall', 'step_f1', 'field_accuracy', 'sequence_accuracy']:
-        lines.append(f"| {key.replace('_', ' ')} | {metrics[key]:.2%} |")
+        lines.append(f"| {key.replace('_', ' ')} | {metrics[key]:.3%} |")
     lines.extend(['', f"Exact step matches: {metrics['step_matches']} / {metrics['predicted_steps']} predicted and {metrics['expected_steps']} expected.",
                   f"Aligned field matches: {metrics['field_matches']} / {metrics['field_total']}.", '',
                   'Step comparison excludes step_no but retains all other fields including evidence IDs. Field comparison uses aligned array positions; missing steps count as seven mismatches. '
@@ -87,7 +87,7 @@ def main(argv=None):
     lines.extend(['## Uncertainty policy comparison', '', 'Both policies reuse saved assessments without new model calls.', '',
                   '| Policy | Status accuracy | Exact row | Sequence |', '| --- | ---: | ---: | ---: |'])
     for policy, result in comparisons.items():
-        lines.append(f"| {policy} | {result['status_accuracy']:.2%} | {result['exact_row_accuracy']:.2%} | {result['sequence_accuracy']:.2%} |")
+        lines.append(f"| {policy} | {result['status_accuracy']:.3%} | {result['exact_row_accuracy']:.3%} | {result['sequence_accuracy']:.3%} |")
     lines.extend(['', 'The configured default remains best-evidence. This comparison does not automatically select per-case answers or change policy. '
                   'Review false COMPLETE cases before applying a general conservative rule; parser/identity/policy errors must be fixed at their source.', '',
                   '## Failures found and improvements made', '',
@@ -101,7 +101,7 @@ def main(argv=None):
                   'and prevent system names in activity prose from becoming cross-subject resource links. Provider regression checks cover exponential backoff/jitter, '
                   'permanent-error handling, retry-budget ownership, and server-directed cooldowns. Async scheduler tests cover rolling RPM/input TPM, '
                   'shared concurrency, shutdown during backoff, all SDK operations, retry admission, real-SDK transport ownership and sanitized quota diagnostics. Groq tests additionally cover role routing, confidence-based independent review, persistent daily quotas, queued cooldowns, cancellation-owned physical permits, and per-model usage/costs. The suite now includes 94 tests; '
-                  'live-provider quality and accuracy refinement still require successful generation access.', '',
+                  'live interpretation remains source-grounded and rejected observations retain scoped uncertainty. See calibration_report.md for the current measured acceptance runs.', '',
                   'Remaining measured failures:', '', '| Case | Expected status | Actual status | Sequence correct | Expected/actual steps |',
                   '| --- | --- | --- | --- | --- |'])
     for failure in metrics['failures']:
@@ -113,7 +113,7 @@ def main(argv=None):
                   'Hidden evaluation answers were not accessed. Status agreement alone is not complete plan correctness.', ''])
     report = ROOT / 'code/evaluation/evaluation_report.md'
     report.write_text('\n'.join(lines), encoding='utf-8')
-    print(f"Samples: status={metrics['status_accuracy']:.2%}, exact rows={metrics['exact_row_accuracy']:.2%}, sequence={metrics['sequence_accuracy']:.2%}")
+    print(f"Samples: status={metrics['status_accuracy']:.3%}, exact rows={metrics['exact_row_accuracy']:.3%}, sequence={metrics['sequence_accuracy']:.3%}")
     print(f"Custom cases: {sum(f['passed'] for f in fixtures)}/{len(fixtures)}; report={report}")
     if args.package:
         usage = ROOT / 'code/evaluation/usage_report.md'

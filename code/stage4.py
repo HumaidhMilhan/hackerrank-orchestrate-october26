@@ -33,10 +33,11 @@ def build_output(assessment, uncertainty='best-evidence'):
     violations = [r for r in resources if r['assessment'] == 'VIOLATION']
     compliant = [r for r in resources if r['assessment'] == 'COMPLIANT' and r.get('evidence_id')]
     observer_failed=assessment.get('observation_failure',False)
-    uncertain = observer_failed or assessment.get('uncertain', False) or any(r['assessment'] == 'UNCERTAIN' for r in resources)
+    material_unknown=any(r['assessment']=='UNCERTAIN' for r in resources)
+    uncertain = observer_failed or assessment.get('uncertain', False) or material_unknown
     estimated = bool(uncertain and not violations)
     status = 'INCOMPLETE' if violations else ('COMPLETE' if compliant else 'INCOMPLETE')
-    if observer_failed or uncertainty == 'incomplete' and uncertain:
+    if observer_failed or material_unknown or uncertainty == 'incomplete' and uncertain:
         status = 'INCOMPLETE'
     if observer_failed:warnings.append('observer failure prevents evidence-backed completion')
     if not resources or not compliant and not violations:
