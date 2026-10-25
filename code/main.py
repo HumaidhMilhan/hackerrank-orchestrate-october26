@@ -276,7 +276,8 @@ def run(args):
                 observations = store.retrieve(context)
             assessment = assess_case(context, observations, rules, store.warnings_for(context) if context['intent'] == 'DELETION' else [])
             assessment['process_paths'] = process_paths(observations)
-            if context['intent'] == 'DELETION' and any(r['assessment'] == 'UNCERTAIN' for r in assessment['resources']):
+            if context['intent'] == 'DELETION' and (not assessment['resources'] or
+                    any(r['assessment'] == 'UNCERTAIN' for r in assessment['resources'])):
                 console.progress('RECHECK', len(checkpoint['results']), len(requests), f'{cid} | Stage 3: one targeted recheck')
                 observations = store.recheck(context, observations)
                 assessment = assess_case(context, observations, rules, store.warnings_for(context))

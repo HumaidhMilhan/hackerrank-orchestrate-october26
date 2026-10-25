@@ -223,11 +223,13 @@ def assess_case(context, observations, rules, extraction_warnings=None):
     for resource in resources:
         if resource['category'] in {'DATA_FLOW', 'BACKUP_ARCHIVE'}:
             resource['reachable_resources'] = reachable_resources(graph, resource['resource_id'])
+    coverage_gap=context['intent']=='DELETION' and not resources
+    if coverage_gap:warnings.append('No subject-linked state evidence at the audit cutoff.')
     return {'case_id': context['case_id'], 'intent': context['intent'], 'audit_at': context['audit_at'],
             'resources': resources, 'warnings': sorted(set(warnings)),
             'process_paths': graph,
             'observation_failure':bool(extraction_warnings),
-            'uncertain': bool(extraction_warnings) or any(r['assessment'] == 'UNCERTAIN' for r in resources)}
+            'uncertain': coverage_gap or bool(extraction_warnings) or any(r['assessment'] == 'UNCERTAIN' for r in resources)}
 
 
 def process_paths(observations):

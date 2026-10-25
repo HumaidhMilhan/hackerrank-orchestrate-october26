@@ -231,7 +231,8 @@ class CliTests(unittest.TestCase):
                     writer.writeheader(); writer.writerows(rows)
             write('deletion_requests.csv', ['case_id', 'email', 'audit_at', 'request_text'],
                   [{'case_id': 'a', 'email': 'subject@example.test', 'audit_at': '2026-02-01T00:00:00Z', 'request_text': 'Delete my account.'},
-                   {'case_id': 'b', 'email': 'other@example.test', 'audit_at': '2026-02-01T00:00:00Z', 'request_text': 'Do not delete my account.'}])
+                   {'case_id': 'b', 'email': 'other@example.test', 'audit_at': '2026-02-01T00:00:00Z', 'request_text': 'Do not delete my account.'},
+                   {'case_id': 'c', 'email': 'missing@example.test', 'audit_at': '2026-02-01T00:00:00Z', 'request_text': 'Delete my account.'}])
             write('user_identities.csv', ['user_id', 'email', 'updated_at'], [])
             write('user_audit_log.csv', ['audit_id', 'user_id', 'event_time'], [])
             write('system_activity.csv', ['activity_id', 'event_time'], [])
@@ -250,7 +251,11 @@ class CliTests(unittest.TestCase):
             for token in ['EXTRACT', 'CASE', 'DONE', 'WARNING', 'RESUME']:
                 self.assertIn(token, stderr.getvalue())
             rows = list(csv.DictReader(io.StringIO(first.decode())))
-            self.assertEqual([r['deletion_status'] for r in rows], ['COMPLETE', 'NOT_APPLICABLE'])
+            self.assertEqual([r['deletion_status'] for r in rows], ['COMPLETE', 'NOT_APPLICABLE', 'INCOMPLETE'])
+            assessments=json.loads((root/'.runtime/assessments-evaluation.json').read_text(encoding='utf-8'))
+            self.assertTrue(assessments['c'].get('recheck_used',False),'empty retrieval needs one bounded recheck')
+            self.assertFalse(assessments['a'].get('recheck_used',False))
+            self.assertFalse(assessments['b'].get('recheck_used',False))
 
     def test_metric_empty_and_missing_steps(self):
         from evaluation.main import evaluate

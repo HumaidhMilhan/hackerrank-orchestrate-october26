@@ -78,7 +78,9 @@ def build_output(assessment, uncertainty='best-evidence'):
     row = {'case_id': assessment['case_id'], 'deletion_status': status,
            'steps_json': json.dumps(steps, ensure_ascii=False, separators=(',', ':'))}
     validate_row(row)
-    return row, {'estimated': estimated, 'warnings': sorted(set(warnings)), 'uncertainty_policy': uncertainty}
+    diagnostic={'estimated': estimated, 'warnings': sorted(set(warnings)), 'uncertainty_policy': uncertainty}
+    if not resources:diagnostic['reason_code']='NO_SUBJECT_LINKED_STATE_EVIDENCE'
+    return row,diagnostic
 
 
 def validate_row(row, evidence_registry=None, cutoff=None):
