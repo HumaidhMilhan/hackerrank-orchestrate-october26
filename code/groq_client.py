@@ -355,7 +355,8 @@ class GroqModelClient(ModelClient):
                     '"confidence":0.99}],"ambiguities":[],"missing_information":[]}. '
                     'Each fact is one row as semicolon-separated key=value fields. Include resource_id; use actual '
                     'field names, values and flags. Optional system_id and record_type only when visible. '
-                    'Only explicit visible resource IDs. Include all visible business rows. Omit UI headings. '
+                    'Only explicit visible resource IDs. Include every table row AND the right-hand selected-record '
+                    'inspector panel, including timestamps. Keep panel fields separate from neighboring rows. Omit UI headings. '
                     'Do not infer absence, compliance or verdicts. Keep keys and quotes concise.')
                 prompt='Read this business artifact. Extract visible record identifiers, status, personal fields and process flags. Be concise; avoid repeating fields or quotes.'
             else:instruction+=' Return an object with the items property.'

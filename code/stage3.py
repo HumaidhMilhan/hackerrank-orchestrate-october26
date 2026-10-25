@@ -62,10 +62,10 @@ def observed_state(obs, context):
             return 'ACTIVE' if allowed else 'BLOCKED'
         if truth(fields.get('deletion_block')) is True:
             return 'BLOCKED'
-        if truth(fields.get('eligible')) is True and truth(fields.get('deletion_block')) is False:
-            return 'ACTIVE'
         if normalize(fields.get('decision')) in {'deny', 'denied'} and normalize(fields.get('policy')) == 'privacy_deletion':
             return 'BLOCKED'
+        if truth(fields.get('deletion_block')) is False:
+            return 'UNKNOWN' if truth(fields.get('eligible')) is False else 'ACTIVE'
         return result if result in {'ACTIVE', 'BLOCKED'} else 'UNKNOWN'
     if category in {'SUPPORT_MESSAGE', 'EMAIL_DELIVERY_LOG', 'ACCOUNT_TOMBSTONE', 'ANALYTICS_PROFILE', 'PRODUCT_TELEMETRY'}:
         treatment = 'ANONYMIZED' if category in {'ANALYTICS_PROFILE', 'PRODUCT_TELEMETRY'} else 'REDACTED'

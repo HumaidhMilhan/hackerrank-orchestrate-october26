@@ -33,7 +33,10 @@ def eligible(observation, cutoff):
     end = timestamp(cutoff)
     captured = timestamp(observation.get('captured_at'))
     observed = timestamp(observation.get('observed_at'))
-    return bool(end and captured and observed and captured <= end and observed <= end)
+    extra = [timestamp(observation[key]) for key in ['snapshot_at', 'event_at'] if key in observation]
+    extra.extend(timestamp(value) for value in observation.get('source_times', []))
+    return bool(end and captured and observed and captured <= end and observed <= end
+                and all(value and value <= end for value in extra))
 
 
 def read_csv(path):

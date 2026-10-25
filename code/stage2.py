@@ -80,7 +80,7 @@ def category_for(collection='', system='', facts=None, resource=''):
 def scope_for(name):
     name = name.lower()
     if 'replica' in name:
-        match = re.search(r'(?:failover_replica|reporting_replica|read_replica|replica_[a-z_]+|replica)', name)
+        match = re.search(r'(?:failover_replica|reporting_replica|regional_replica|read_replica|replica_[a-z_]+|replica)', name)
         return match.group(0) if match else 'replica'
     return 'primary'
 
@@ -98,21 +98,31 @@ def observation(meta, resource, system, category, facts, location, observed_at=N
 def parse_json(meta, obj):
     output = []
 
-    def walk(value, path='$', system='', collection='', observed=None):
+    def walk(value, path='$', system='', collection='', observed=None, source_times=()):
         if isinstance(value, list):
             for index, child in enumerate(value):
-                walk(child, f'{path}[{index}]', system, collection, observed)
+                walk(child, f'{path}[{index}]', system, collection, observed, source_times)
             return
         if not isinstance(value, dict):
             return
         system = value.get('data_store', value.get('system', system))
         collection = value.get('collection', collection)
-        observed = value.get('observed_at', value.get('recorded_at', value.get('captured_at', observed)))
+        parent_times = source_times
+        source_times += tuple(value[key] for key in ['observed_at', 'recorded_at', 'captured_at', 'event_time'] if key in value)
+        observed = value.get('observed_at', value.get('recorded_at', value.get('captured_at', value.get('event_time', observed))))
         resource = value.get('resource_id')
         if resource:
             origin, category = category_for(collection, system, value, resource)
             # Preserve the complete row, including nested profile/document fields.
             row = observation(meta, resource, origin, category, value, path, observed)
+            # Keep every explicit containing timestamp, including invalid/null
+            # values. Precedence for state chronology cannot bypass eligibility.
+            row['source_times'] = list(source_times)
+            valid_parent_times = [value for value in parent_times if timestamp(value)]
+            if valid_parent_times:
+                row['snapshot_at'] = max(valid_parent_times, key=timestamp)
+            if value.get('event_time'):
+                row['event_at'] = value['event_time']
             # A snapshot record is a complete payload; query results and event summaries are not.
             row['payload_complete'] = not any(key in value for key in ['event', 'event_type', 'result', 'rows', 'total_hits'])
             output.append(row)
@@ -122,15 +132,15 @@ def parse_json(meta, obj):
                 for service, groups in child.items():
                     if isinstance(groups, dict):
                         for group, rows in groups.items():
-                            walk(rows, f'{path}.{key}.{service}.{group}', service, group, observed)
+                            walk(rows, f'{path}.{key}.{service}.{group}', service, group, observed, source_times)
             elif isinstance(child, (dict, list)):
-                walk(child, f'{path}.{key}', system, collection, observed)
+                walk(child, f'{path}.{key}', system, collection, observed, source_times)
 
     walk(obj)
     return output
 
 
-def parse_sql(meta, text):
+def parse_sql(meta, text, absent_targets=()):
     output = []
     connection = sqlite3.connect(':memory:')
     connection.row_factory = sqlite3.Row
@@ -141,9 +151,20 @@ def parse_sql(meta, text):
             return sqlite3.SQLITE_DENY
         return sqlite3.SQLITE_OK
     connection.set_authorizer(authorize)
+    declared_snapshot = ('point-in-time database snapshot' in text.casefold() and
+                         not re.search(r'\b(?:filtered|partial|subset|sampled)\b', text, re.I))
+    capture = re.search(r'^--\s*Captured at:\s*(\S+)', text, re.M | re.I)
+    snapshot_at = capture.group(1) if capture else meta['captured_at']
     try:
         connection.executescript(text)
         tables = [row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")]
+        scope_times = defaultdict(list)
+        if 'snapshot_scope' in tables:
+            for item in connection.execute('SELECT * FROM snapshot_scope'):
+                fields = dict(item)
+                origin = fields.get('origin_system', fields.get('system', ''))
+                scope_times[origin].extend(fields[key] for key in ['captured_at', 'observed_at', 'recorded_at', 'event_time']
+                                           if key in fields)
         for table in tables:
             if table == 'snapshot_scope':
                 continue
@@ -160,7 +181,24 @@ def parse_sql(meta, text):
                 row = observation(meta, resource, system, category, facts,
                                   f'{table}[resource_id={resource}]', scope=scope_for(table))
                 row['payload_complete'] = True
+                row['source_times'] = [snapshot_at, *scope_times.get('', []), *scope_times.get(system, [])]
                 output.append(row)
+            if absent_targets and declared_snapshot:
+                columns = {row[1] for row in connection.execute('PRAGMA table_info(' + quoted + ')')}
+                system, category = category_for(table)
+                for target in absent_targets:
+                    if ('resource_id' not in columns or system != target['system_id'] or
+                        category != target['category']):
+                        continue
+                    exists = connection.execute('SELECT 1 FROM ' + quoted + ' WHERE resource_id=? LIMIT 1',
+                                                (target['resource_id'],)).fetchone()
+                    if exists is None:
+                        row = observation(meta, target['resource_id'], system, category,
+                            {'rows': 0, 'queried_resource_id': target['resource_id'], 'snapshot_table': table,
+                             'query_scope': 'declared_exported_table'},
+                            f'{table}; parameterized resource_id lookup', snapshot_at, scope_for(table))
+                        row['source_times'] = [snapshot_at, *scope_times.get('', []), *scope_times.get(system, [])]
+                        output.append(row)
     finally:
         connection.close()
     return output
@@ -216,7 +254,7 @@ def parse_logs(meta, text):
             boundaries[trace]=(service,resource if new_read or resource else previous[1] if previous else None)
             prior = contexts.setdefault(trace, {})
             # Lookup identity can be on a separate line; never inherit a result/state from a prior read.
-            for key in ['lookup_key', 'match_key', 'subject_key', 'subject_ref', 'correlation_key', 'customer_email', 'customer_reference',
+            for key in ['lookup_key', 'match_key', 'subject_key', 'subject_ref', 'owner_key', 'correlation_key', 'customer_email', 'customer_reference',
                         'source','collection','record_type']:
                 if key in facts and facts[key] is not None:
                     prior[key] = facts[key]
@@ -369,11 +407,23 @@ class EvidenceStore:
         self.by_resource = defaultdict(list)
         self.by_alias = defaultdict(list)
         self.cache_hits = 0
+        self.request_population = []
+        self.sql_query_cache = {}
         self.local_observers={'engine':'rapidocr-onnxruntime/1.2.3','screens':0,'inference_calls':0,'cache_hits':0,'seconds':0}
         self.parser_signature = digest(b''.join(Path(__file__).with_name(name).read_bytes()
             for name in ['stage2.py','common.py','screen_ocr.py','visual_observer.py']))
 
     def prepare(self):
+        # Use both participant request files for isolation; sample mode must not
+        # manufacture isolation by hiding nearby evaluation requests.
+        population = {}
+        for name in ['deletion_requests.csv', 'sample_deletion_requests.csv']:
+            path = self.dataset / name
+            if path.is_file():
+                for row in read_csv(path):
+                    key = (row.get('case_id'), row.get('requested_at'), row.get('reported_at'))
+                    population[key] = row
+        self.request_population = list(population.values())
         manifest = read_csv(self.dataset / 'evidence_files.csv')
         logger = logging.getLogger('audit')
         evidence_root = (self.dataset / 'evidence').resolve()
@@ -497,6 +547,55 @@ class EvidenceStore:
             return parse_json(meta,rows)
         raise ValueError('unsupported evidence format')
 
+    def isolated_worker_link(self, context):
+        """User-supplied isolated-workflow convention; establishes a target, never its state."""
+        requested, report, cutoff = (timestamp(context.get(key)) for key in ['requested_at', 'reported_at', 'audit_at'])
+        if (context.get('intent') != 'DELETION' or len(context.get('user_ids', [])) != 1 or
+            not requested or not report or not cutoff or not requested <= report <= cutoff):
+            return None
+        if not any(row.get('case_id') == context['case_id'] and timestamp(row.get('reported_at')) == report
+                   for row in self.request_population):
+            return None
+        for row in self.request_population:
+            other = timestamp(row.get('reported_at'))
+            if row.get('case_id') != context['case_id'] and other and other <= cutoff and abs((other-report).total_seconds()) <= 900:
+                return None
+        operations = {'DELETE_RECORD', 'REDACT_RECORD', 'ANONYMIZE_RECORD', 'DISABLE_DATA_FLOW', 'BLOCK_RESTORE'}
+        known_owners = {normalize(uid) for uid in context['user_ids']}
+        candidates = []
+        for row in self.activities:
+            facts = row['facts']; when = timestamp(row['observed_at'])
+            if (not eligible(row, context['audit_at']) or not requested <= when <= cutoff or
+                abs((when-report).total_seconds()) > 900 or facts.get('source_system') != 'deletion_worker' or
+                facts.get('event_type') not in operations):
+                continue
+            targets = re.findall(r'\bTarget resource:\s*([\w-]+)', facts.get('details', ''), re.I)
+            if targets != [row['resource_id']]:
+                continue
+            worker_owners = {normalize(uid) for uid in USER_RE.findall(facts.get('details', ''))}
+            worker_emails = {normalize(email) for email in EMAIL_RE.findall(facts.get('details', ''))}
+            if not worker_owners.issubset(known_owners) or not worker_emails.issubset(context['identifiers']):
+                continue
+            candidates.append(row)
+        if len(candidates) != 1:
+            return None
+        row = candidates[0]
+        for observed in self.by_resource.get(row['resource_id'], []):
+            if not eligible(observed, context['audit_at']) or observed.get('kind') == 'claim':
+                continue
+            owners = {normalize(value) for key, value in flatten(observed['facts']).items()
+                      if key in {'user_id', 'customer_reference', 'subject_reference', 'subject_ref'}
+                      and value and USER_RE.fullmatch(str(value))}
+            if not owners.issubset(known_owners):
+                return None
+            emails = {normalize(value) for key, value in flatten(observed['facts']).items()
+                      if key in {'email', 'owner_email', 'requester_email', 'customer_email'}
+                      and value and EMAIL_RE.fullmatch(str(value))}
+            if not emails.issubset(context['identifiers']):
+                return None
+        return {**row, 'link_provenance': {'method': 'isolated_report_worker_window',
+                'reported_at': context['reported_at'], 'window_seconds': 900}}
+
     def retrieve(self, context):
         cutoff = context['audit_at']
         known_subjects = {normalize(uid) for uid in context.get('user_ids', [])}
@@ -506,6 +605,10 @@ class EvidenceStore:
                       and value and USER_RE.fullmatch(str(value))}
             return not known_subjects or not owners or bool(owners.intersection(known_subjects))
         selected, resources = {}, set()
+        worker_link = self.isolated_worker_link(context)
+        if worker_link:
+            selected[(worker_link['evidence_id'], worker_link['location'], worker_link['resource_id'])] = worker_link
+            resources.add(worker_link['resource_id'])
         for identifier in context['identifiers']:
             for obs in self.by_identifier.get(normalize(identifier), []):
                 if eligible(obs, cutoff) and attributable(obs):
@@ -565,13 +668,38 @@ class EvidenceStore:
             for resource in sorted(resources):
                 for obs in self.by_resource.get(resource, []):
                     if eligible(obs, cutoff) and attributable(obs):
-                        selected[(obs['evidence_id'], obs['location'], obs['resource_id'])] = obs
+                        selected.setdefault((obs['evidence_id'], obs['location'], obs['resource_id']), obs)
                         discovered.add(obs['resource_id'])
                         discovered.update(obs.get('linked_resources', []))
             new = discovered - resources
             if not new:
                 break
             resources.update(new)
+        if worker_link and worker_link['facts'].get('event_type') == 'DELETE_RECORD':
+            # Query only an independently linked target, in declared full SQL
+            # tables captured after the operation. This never invents a resource
+            # from a user/case number or treats worker SUCCESS as absence.
+            for meta in self.artifacts.values():
+                if Path(meta['file_path']).suffix.lower() != '.sql':
+                    continue
+                captured = timestamp(meta.get('captured_at'))
+                anchor = timestamp(worker_link['observed_at'])
+                if not captured or not anchor <= captured <= timestamp(cutoff):
+                    continue
+                key = (meta['file_id'], worker_link['system_id'], worker_link['resource_id'])
+                if key not in self.sql_query_cache:
+                    try:
+                        text = (self.dataset / meta['file_path']).read_text(encoding='utf-8-sig')
+                        self.sql_query_cache[key] = [row for row in parse_sql(meta, text, [worker_link])
+                                                    if row['facts'].get('query_scope') == 'declared_exported_table']
+                    except (OSError, sqlite3.Error, ValueError):
+                        self.sql_query_cache[key] = []
+                        if not any(item['file_id'] == meta['file_id'] for item in self.failures):
+                            self.failures.append(meta)
+                        logging.getLogger('audit').warning('%s: scoped SQL query failed; retaining uncertainty', meta['file_id'])
+                for row in self.sql_query_cache[key]:
+                    if eligible(row, cutoff) and timestamp(row['observed_at']) >= anchor:
+                        selected[(row['evidence_id'], row['location'], row['resource_id'])] = row
         return sorted(selected.values(), key=lambda o: (o['observed_at'], o['evidence_id'], o['location']))
 
     def warnings_for(self, context):

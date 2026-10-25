@@ -45,6 +45,126 @@ class IntentTests(unittest.TestCase):
         self.assertEqual(result['user_ids'], [])
 
 
+class FinalPolishTests(unittest.TestCase):
+    def test_scoped_marketing_and_information_requests(self):
+        from stage1 import fallback_intent
+        examples = {
+            'Please remove me from marketing lists only. I still want receipts for this account.': 'NON_DELETION',
+            'Tell me what personal information you hold; this is not a request to erase it.': 'NON_DELETION',
+            'I still use my account, so please do not delete or change anything.': 'NON_DELETION',
+            'Keep my account and receipts; I am not asking for deletion.': 'NON_DELETION',
+            'The surname on my account is wrong. Correct it without removing records.': 'NON_DELETION',
+            'Remove me from marketing lists and delete my account.': 'DELETION',
+            'This is not a request to erase receipts; please delete my account.': 'DELETION',
+            'Do not delete anything from billing; delete my account.': 'DELETION',
+            'Ne supprimez pas les factures; veuillez supprimer mon compte.': 'DELETION',
+            'Não exclua as faturas; exclua minha conta.': 'DELETION',
+            'Do not send confirmation emails; delete my account.': 'DELETION',
+            'Exclua minha conta e meus dados pessoais.': 'DELETION',
+            'Não exclua minha conta; quero apenas uma cópia dos dados.': 'NON_DELETION',
+        }
+        for text, expected in examples.items():
+            with self.subTest(text=text):
+                self.assertEqual(fallback_intent(text)[0], expected)
+
+    def test_trace_owner_key_is_preserved_without_cross_read_leak(self):
+        from stage2 import parse_logs
+        meta = {'file_id': 'fixture-log', 'captured_at': '2026-02-01T00:00:00Z'}
+        text = '\n'.join([
+            '2026-01-01T00:00:00Z [DEBUG] [account_service] [tr-fictional] profile_lookup_started: owner_key="subject@example.test"',
+            '2026-01-01T00:00:01Z [INFO] [account_service] [tr-fictional] profile_lookup_completed: resource_id="account-fictional" rows="0"',
+            '2026-01-01T00:00:02Z [DEBUG] [account_service] [tr-fictional] profile_lookup_started: lookup_key="other@example.test"',
+            '2026-01-01T00:00:03Z [INFO] [account_service] [tr-fictional] profile_lookup_completed: resource_id="account-other" rows="0"',
+        ])
+        rows = parse_logs(meta, text)
+        self.assertIn('subject@example.test', rows[0]['identifiers'])
+        self.assertNotIn('subject@example.test', rows[1]['identifiers'])
+
+    def test_replica_scope_names_stay_distinct(self):
+        from stage2 import scope_for
+        for name in ['failover_replica', 'regional_replica', 'read_replica', 'reporting_replica']:
+            with self.subTest(scope=name):
+                self.assertEqual(scope_for('customer_data_' + name), name)
+
+    def test_json_event_time_cutoff_and_null_are_preserved(self):
+        from stage2 import parse_json
+        from common import eligible
+        meta = {'file_id': 'fixture-json', 'captured_at': '2026-01-01T00:00:00Z'}
+        rows = parse_json(meta, {'captured_at': meta['captured_at'], 'records': [
+            {'resource_id': 'account-late', 'event_time': '2026-01-03T00:00:00Z', 'email': None},
+            {'resource_id': 'account-now', 'observed_at': meta['captured_at']},
+        ]})
+        self.assertFalse(eligible(rows[0], '2026-01-02T00:00:00Z'))
+        self.assertIsNone(rows[0]['facts']['email'])
+        self.assertNotIn('email', rows[1]['facts'])
+
+    def test_json_parent_snapshot_cannot_be_bypassed_by_old_record_time(self):
+        from stage2 import parse_json
+        from common import eligible
+        meta = {'file_id': 'fixture-json', 'captured_at': '2026-01-01T00:00:00Z'}
+        row = parse_json(meta, {'captured_at': '2026-01-04T00:00:00Z', 'snapshots': [
+            {'captured_at': '2026-01-01T00:00:00Z', 'records': [
+                {'resource_id': 'account-fictional', 'observed_at': '2026-01-01T00:00:00Z'}]}]})[0]
+        self.assertFalse(eligible(row, '2026-01-02T00:00:00Z'))
+
+    def test_explicit_unblocked_archive_is_a_restore_risk(self):
+        from evaluation.fixtures import context, obs
+        from stage3 import observed_state
+        record = obs(category='BACKUP_ARCHIVE', facts={'deletion_block': False})
+        self.assertEqual(observed_state(record, context()), 'ACTIVE')
+
+    def test_explicit_restore_denial_wins_over_missing_deletion_marker(self):
+        from evaluation.fixtures import context, obs
+        from stage3 import observed_state
+        record = obs(category='BACKUP_ARCHIVE', facts={'deletion_block': False,
+                     'decision': 'deny', 'policy': 'privacy_deletion'})
+        self.assertEqual(observed_state(record, context()), 'BLOCKED')
+        record = obs(category='BACKUP_ARCHIVE', facts={'deletion_block': False, 'eligible': False})
+        self.assertEqual(observed_state(record, context()), 'UNKNOWN')
+
+    def test_every_explicit_container_time_is_checked(self):
+        from stage2 import parse_json
+        from common import eligible
+        meta = {'file_id': 'fixture-json', 'captured_at': '2026-01-01T00:00:00Z'}
+        for extra in [{'captured_at': '2026-01-04T00:00:00Z'},
+                      {'event_time': '2026-01-04T00:00:00Z'},
+                      {'recorded_at': None}, {'recorded_at': ''}]:
+            with self.subTest(extra=extra):
+                data = {'observed_at': '2026-01-01T00:00:00Z', **extra,
+                        'records': [{'resource_id': 'account-fictional'}]}
+                row = parse_json(meta, data)[0]
+                self.assertFalse(eligible(row, '2026-01-02T00:00:00Z'))
+
+    def test_partial_sql_population_cannot_prove_missing_resource_absent(self):
+        from stage2 import parse_sql
+        meta = {'file_id': 'fixture-sql', 'captured_at': '2026-01-01T00:00:00Z'}
+        sql = "CREATE TABLE snapshot_scope(origin_system TEXT,captured_at TEXT); INSERT INTO snapshot_scope VALUES('account_service','2026-01-01T00:00:00Z'); CREATE TABLE customer_profiles(resource_id TEXT,email TEXT); INSERT INTO customer_profiles VALUES('account-unrelated','other@example.test');"
+        rows = parse_sql(meta, sql)
+        self.assertEqual([r['resource_id'] for r in rows], ['account-unrelated'])
+        # A separate connection cannot inherit the previous snapshot's rows.
+        self.assertEqual(parse_sql(meta, 'CREATE TABLE customer_profiles(resource_id TEXT);'), [])
+
+    def test_twenty_intents_missing_duplicate_and_ungrounded_results(self):
+        from stage1 import interpret_requests
+        class Client:
+            enabled = True
+            intent_review_model = 'fixture-review'
+            intent_confidence_threshold = .8
+            intent_batch_size = 20
+            def request_json(self, task, prompt, schema, validator=None):
+                items = [dict(case_id='fictional-' + str(i), intent='DELETION', confidence=.99,
+                              supporting_phrase='Delete my account') for i in range(19)]
+                items.append(dict(items[0]))
+                items[1]['supporting_phrase'] = 'invented phrase'
+                return validator(items)
+        requests = [dict(case_id='fictional-' + str(i), request_text='Delete my account') for i in range(20)]
+        result = interpret_requests(requests, Client())
+        self.assertEqual(set(result), {r['case_id'] for r in requests})
+        for i in [0, 1, 19]:
+            self.assertEqual(result['fictional-' + str(i)]['method'], 'rules')
+        self.assertEqual(result['fictional-2']['method'], 'model')
+
+
 class PolicyTests(unittest.TestCase):
     def test_independent_custom_cases(self):
         from evaluation.fixtures import run_fixtures
@@ -385,6 +505,121 @@ class ReviewRegressionTests(unittest.TestCase):
         from stage3 import assess_case
         assessment = assess_case(context(), [obs(resource='flow-demo', system='integration_service', category='DATA_FLOW', facts={'enabled': True})], RULES)
         self.assertEqual(assessment['resources'][0]['assessment'], 'UNCERTAIN')
+
+
+class TemporalLinkageTests(unittest.TestCase):
+    prepare_store = ReviewRegressionTests.prepare_store
+
+    def make_store(self, root, *, records=None, neighbor=False, sql=None, event_changes=None, duplicate=False):
+        import csv
+        from evaluation.fixtures import context
+        ctx = {**context('fictional-request'), 'requested_at': '2026-01-10T00:00:00Z',
+               'reported_at': '2026-01-15T12:00:00Z', 'user_ids': ['user_subject']}
+        request = {key: ctx[key] for key in ['case_id', 'requested_at', 'reported_at', 'audit_at']}
+        with (root / 'deletion_requests.csv').open('w', newline='') as handle:
+            writer = csv.DictWriter(handle, fieldnames=list(request)); writer.writeheader(); writer.writerow(request)
+        if neighbor:
+            with (root / 'sample_deletion_requests.csv').open('w', newline='') as handle:
+                writer = csv.DictWriter(handle, fieldnames=list(request)); writer.writeheader()
+                writer.writerow({**request, 'case_id': 'other-request', 'reported_at': '2026-01-15T12:05:00Z'})
+        event = {'activity_id': 'worker-fixture', 'event_time': '2026-01-15T11:58:00Z',
+                 'event_type': 'DELETE_RECORD', 'source_system': 'deletion_worker', 'target_system': 'account_service',
+                 'resource_id': 'account_example', 'reported_result': 'SUCCESS',
+                 'details': 'Requested operation completed. Target resource: account_example.'}
+        event.update(event_changes or {})
+        activities = [event] + ([{**event, 'activity_id': 'second-worker'}] if duplicate else [])
+        extra = []
+        if sql is not None:
+            (root / 'evidence').mkdir(exist_ok=True)
+            (root / 'evidence/snapshot.sql').write_text(sql, encoding='utf-8')
+            extra = [{'file_id': 'sql-fixture', 'file_path': 'evidence/snapshot.sql', 'captured_at': '2026-01-20T00:00:00Z'}]
+        store = self.prepare_store(root, records or [], activities, extra)
+        return store, ctx
+
+    def test_isolated_worker_links_anonymous_state_without_trusting_result(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            store, ctx = self.make_store(Path(tmp), records=[{'resource_id': 'analytics_example',
+                'system': 'analytics_platform', 'record_type': 'ANALYTICS_PROFILE',
+                'user_id': None, 'email': None, 'phone': None, 'email_hash': None}],
+                event_changes={'resource_id': 'analytics_example', 'target_system': 'analytics_platform',
+                    'event_type': 'ANONYMIZE_RECORD', 'details': 'Target resource: analytics_example.'})
+            rows = store.retrieve(ctx)
+            self.assertEqual({r['resource_id'] for r in rows}, {'analytics_example'})
+            self.assertEqual({r['kind'] for r in rows}, {'claim', 'observation'})
+            self.assertEqual(next(r for r in rows if r['kind'] == 'claim')['link_provenance']['method'],
+                             'isolated_report_worker_window')
+
+    def test_worker_success_alone_is_not_state_proof(self):
+        import tempfile
+        from stage3 import assess_case
+        from evaluation.fixtures import RULES
+        with tempfile.TemporaryDirectory() as tmp:
+            store, ctx = self.make_store(Path(tmp))
+            assessment = assess_case(ctx, store.retrieve(ctx), RULES)
+            self.assertEqual(len(assessment['resources']), 1)
+            self.assertEqual(assessment['resources'][0]['state'], 'UNKNOWN')
+
+    def test_ambiguous_or_invalid_workflow_links_are_rejected(self):
+        import tempfile
+        variants = [{'neighbor': True}, {'duplicate': True},
+                    {'event_changes': {'source_system': 'other-worker'}},
+                    {'event_changes': {'details': 'Target resource: account_other.'}},
+                    {'event_changes': {'event_time': '2026-01-09T12:00:00Z'}},
+                    {'event_changes': {'event_time': '2026-02-02T12:00:00Z'}},
+                    {'event_changes': {'details': 'Owner user_other. Target resource: account_example.'}},
+                    {'records': [{'resource_id': 'account_example', 'user_id': 'user_other',
+                                  'system': 'account_service', 'email': 'other@example.test'}]},
+                    {'records': [{'resource_id': 'account_example', 'system': 'account_service',
+                                  'email': 'other@example.test'}]},
+                    {'records': [{'resource_id': 'account_example', 'system': 'account_service',
+                                  'user_id': 'user_subject', 'subject_reference': 'user_other'}]},
+                    {'records': [{'resource_id': 'account_example', 'system': 'account_service',
+                                  'user_id': 'user_subject', 'email': 'other@example.test'}]}]
+        for variant in variants:
+            with self.subTest(variant=variant), tempfile.TemporaryDirectory() as tmp:
+                store, ctx = self.make_store(Path(tmp), **variant)
+                self.assertEqual(store.retrieve(ctx), [])
+
+    def test_scoped_sql_absence_requires_known_target_and_full_snapshot(self):
+        import tempfile
+        from stage3 import assess_case
+        from stage4 import build_output
+        from evaluation.fixtures import RULES
+        sql = ('-- Ghost data: point-in-time database snapshot\n-- Captured at: 2026-01-20T00:00:00Z\n'
+               'CREATE TABLE customer_profiles_primary(resource_id TEXT,user_id TEXT,email TEXT);\n'
+               'CREATE TABLE customer_profiles_failover_replica(resource_id TEXT,user_id TEXT,email TEXT);\n')
+        with tempfile.TemporaryDirectory() as tmp:
+            store, ctx = self.make_store(Path(tmp), sql=sql)
+            rows = store.retrieve(ctx)
+            absent = [r for r in rows if r['facts'].get('rows') == 0]
+            self.assertEqual({r['scope'] for r in absent}, {'primary', 'failover_replica'})
+            self.assertEqual({r['resource_id'] for r in rows}, {'account_example'})
+            self.assertEqual(build_output(assess_case(ctx, rows, RULES))[0]['deletion_status'], 'COMPLETE')
+        with tempfile.TemporaryDirectory() as tmp:
+            store, ctx = self.make_store(Path(tmp), sql=sql.replace('database snapshot', 'filtered database snapshot'))
+            self.assertFalse(any(r['facts'].get('rows') == 0 for r in store.retrieve(ctx)))
+        with tempfile.TemporaryDirectory() as tmp:
+            store, ctx = self.make_store(Path(tmp), sql=sql + "INSERT INTO customer_profiles_failover_replica VALUES('account_example','user_subject','subject@example.test');")
+            self.assertEqual(build_output(assess_case(ctx, store.retrieve(ctx), RULES))[0]['deletion_status'], 'INCOMPLETE')
+        with tempfile.TemporaryDirectory() as tmp:
+            store, ctx = self.make_store(Path(tmp), sql=sql)
+            ctx['audit_at'] = '2026-01-19T00:00:00Z'
+            self.assertFalse(any(r['facts'].get('rows') == 0 for r in store.retrieve(ctx)))
+
+    def test_internal_sql_snapshot_times_gate_presence_and_absence(self):
+        from stage2 import parse_sql
+        from common import eligible
+        meta = {'file_id': 'sql-fixture', 'captured_at': '2026-01-20T00:00:00Z'}
+        target = {'resource_id': 'account_example', 'system_id': 'account_service', 'category': 'USER_PROFILE'}
+        sql = ('-- Point-in-time database snapshot\n-- Captured at: 2026-01-20T00:00:00Z\n'
+               'CREATE TABLE snapshot_scope(origin_system TEXT,captured_at TEXT);\n'
+               "INSERT INTO snapshot_scope VALUES('account_service','2026-03-01T00:00:00Z');\n"
+               'CREATE TABLE customer_profiles_primary(resource_id TEXT,user_id TEXT,email TEXT);\n'
+               "INSERT INTO customer_profiles_primary VALUES('account_other','user_other','other@example.test');")
+        rows = parse_sql(meta, sql, [target])
+        self.assertEqual(len(rows), 2)
+        self.assertTrue(all(not eligible(row, '2026-02-01T00:00:00Z') for row in rows))
 
 
 if __name__ == '__main__':

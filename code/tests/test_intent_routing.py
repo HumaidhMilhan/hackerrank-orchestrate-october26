@@ -68,3 +68,12 @@ class IntentRoutingTests(unittest.TestCase):
         self.assertEqual(result['a']['method'], 'model')
         self.assertEqual(result['b']['method'], 'model_review')
         self.assertNotIn('"case_id": "a"', client.requests[1][1])
+
+    def test_model_review_cannot_revoke_explicit_deletion_followup(self):
+        text = 'I deleted my account after changing the contact email. Please check that nothing tied to the previous address remains.'
+        phrase = 'changing the contact email'
+        result, client = self.run_case([[item(intent='NON_DELETION', phrase=phrase)],
+                                        [item(intent='NON_DELETION', phrase=phrase)]], text)
+        self.assertEqual(result['intent'], 'DELETION')
+        self.assertEqual(result['method'], 'rules')
+        self.assertEqual(len(client.requests), 2)

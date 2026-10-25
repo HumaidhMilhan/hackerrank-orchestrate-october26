@@ -158,6 +158,19 @@ def write_usage_report(summary, root):
         lines.append(f"| {model} | {item['calls']} | {item['input_tokens']} | {item['output_tokens']} | {item['thinking_tokens']} | {item['cached_tokens']} | {item['unknown_usage_calls']} | {cost} |")
     if not summary['models']:
         lines.append('| No model invoked (offline/rule fallback) | 0 | 0 | 0 | 0 | 0 | 0 | 0 |')
+    lines.extend(['', '## Per-model run diagnostics', '',
+                  '| Provider/model | Attempts | Accepted | Truncated | HTTP failures | Validation failures | Local quota skips | Retries | Total known tokens | Tokens/request | USD/request |',
+                  '| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |'])
+    for model, item in summary['models'].items():
+        known_tokens = item['input_tokens'] + item['output_tokens'] + item['thinking_tokens']
+        average = known_tokens / summary['requests'] if summary['requests'] else 0
+        cost = item['estimated_usd']
+        average_cost = f"{cost / summary['requests']:.8f}" if cost is not None and summary['requests'] else 'unavailable'
+        counts = ' | '.join(str(item.get(key, 0)) for key in ['attempted_calls', 'successful_calls', 'truncated_calls',
+                             'http_failures', 'validation_failures', 'local_quota_skips', 'transport_retries'])
+        lines.append(f'| {model} | {counts} | {known_tokens} | {average:.3f} | {average_cost} |')
+    lines.extend(['', 'Token totals include only provider-reported usage. HTTP and validation failure counts can overlap; '
+                  'local quota skips are not provider attempts. Cost is unavailable when rates or usage are unknown.', ''])
     lines.extend(['', f"Overall calls: {overall['calls']}; input tokens: {overall['input_tokens']}; output tokens: {overall['output_tokens']}; thinking tokens: {overall['thinking_tokens']}.",
                   f"Total reported tokens: {overall['total_tokens']}; average per request: {overall['average_tokens_per_request']:.3f}.",
                   f"Estimated total USD: {overall['estimated_usd']}; per request: {overall['estimated_usd_per_request']}.", '',
@@ -165,8 +178,10 @@ def write_usage_report(summary, root):
                   'SDK operation counts: ' + json.dumps(summary.get('operation_counts', {}), sort_keys=True) + '. '
                   'Gemini token-count requests count toward local RPM/concurrency and reserve generation input TPM. '
                   'They do not contribute generated-model input/output totals. Groq reserves combined input/output TPM and daily budgets; '
-                  'reasoning is already included in completion tokens. Failed requests retain conservative reservations.', '',
+                  'reasoning is already included in completion tokens. Minute reservations settle using returned usage and headers; '
+                  'unsettled minute usage remains conservative. Daily usage records confirmed responses, not local skips.', '',
                   'Task counts (including secondary intent evaluation): ' + json.dumps(summary.get('task_counts', {}), sort_keys=True) + '.', '',
+                  'Local observers (separate from hosted tokens): ' + json.dumps(summary.get('local_observers', {}), sort_keys=True) + '.', '',
                   'Costs require explicitly configured verified per-million rates. A free tier may have zero money cost but nonzero quota/token usage. '
                   'Unknown token usage is excluded from numerical totals and disclosed above. Cached extraction construction cost from previous runs is not included in this run; '
                   'record those earlier runs separately when calculating total project expenditure. Offline runs do not verify live model/vision accuracy.', ''])
